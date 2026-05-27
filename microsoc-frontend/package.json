@@ -1,0 +1,9 @@
+{
+  "name": "microsoc-frontend-react",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "node dev-server.js",
+    "start": "npm run dev"
+  }
+}
