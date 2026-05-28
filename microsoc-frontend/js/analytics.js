@@ -770,7 +770,7 @@ async function generateAIInsights() {
     showNotification('Generating AI SOC report...', 'info');
 
     try {
-        const response = await fetch('http://localhost:5001/api/ai/generate-report', {
+        const response = await fetch('https://microsoc-backend.onrender.com/api/ai/generate-report', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

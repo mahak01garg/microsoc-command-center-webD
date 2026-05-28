@@ -47,7 +47,7 @@ async function loadIncidents() {
     try {
         const token = localStorage.getItem("token");
 
-        const res = await fetch("http://localhost:5001/api/incidents", {
+        const res = await fetch("https://microsoc-backend.onrender.com/api/incidents", {
             headers: {
                 "Authorization": `Bearer ${token}`
             }
@@ -330,7 +330,7 @@ async function triageIncidentWithAI(id) {
     if (!incident) return;
 
     try {
-        const response = await fetch('http://localhost:5001/api/ai/triage-incident', {
+        const response = await fetch('https://microsoc-backend.onrender.com/api/ai/triage-incident', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

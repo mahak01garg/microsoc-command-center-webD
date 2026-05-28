@@ -683,7 +683,7 @@ async function explainLogWithAI(logId) {
     showNotification('AI is explaining this log...', 'info');
 
     try {
-        const response = await fetch('http://localhost:5001/api/ai/explain-log', {
+        const response = await fetch('https://microsoc-backend.onrender.com/api/ai/explain-log', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -748,7 +748,7 @@ async function persistIncident(incident) {
         impact: incident.severity
     };
 
-    const response = await fetch('http://localhost:5001/api/incidents', {
+    const response = await fetch('https://microsoc-backend.onrender.com/api/incidents', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',

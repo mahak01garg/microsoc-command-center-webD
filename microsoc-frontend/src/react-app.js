@@ -176,7 +176,7 @@
             const thinking = appendAIMessage(messages, 'Thinking...', 'assistant');
 
             try {
-                const response = await fetch('http://localhost:5001/api/ai/chat', {
+                const response = await fetch('https://microsoc-backend.onrender.com/api/ai/chat', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
