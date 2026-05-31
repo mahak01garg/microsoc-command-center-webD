@@ -69,7 +69,7 @@ window.MICROSOC_PAGES = {
         "src": "data/mock-data.js"
       },
       {
-        "code": "\n        // Initialize logs page\n        document.addEventListener('DOMContentLoaded', function() {\n            // Check authentication\n            const user = JSON.parse(localStorage.getItem('user'));\n            if (!token) {\n                window.location.href = 'login.html';\n                return;\n            }\n            \n            // Update user info\n            document.getElementById('user-name').textContent = user.name;\n            document.getElementById('user-role').textContent = user.role.charAt(0).toUpperCase() + user.role.slice(1);\n            \n            // Initialize logs\n            initLogs();\n            \n            // Start live stream by default\n            startLiveStream();\n        });\n    "
+        "code": "\n        // Initialize logs page\n        document.addEventListener('DOMContentLoaded', function() {\n            // Check authentication\n            const token = localStorage.getItem('token');\n            const user = JSON.parse(localStorage.getItem('user'));\n            if (!token) {\n                window.location.href = 'login.html';\n                return;\n            }\n            \n            // Update user info\n            document.getElementById('user-name').textContent = user.name;\n            document.getElementById('user-role').textContent = user.role.charAt(0).toUpperCase() + user.role.slice(1);\n            \n            // Initialize logs. Stream starts only when the Start Live Stream button is clicked.\n            initLogs();\n        });\n    "
       }
     ]
   },

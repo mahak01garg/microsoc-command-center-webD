@@ -9,14 +9,48 @@ let liveStreamInterval = null;
 let currentPage = 1;
 let itemsPerPage = 25;
 let totalPages = 1;
+const LOG_STORAGE_KEY = 'microsocSecurityLogs';
+const MAX_STORED_LOGS = 1000;
+
+function getApiBaseUrl() {
+    return window.MICROSOC_API_BASE_URL || 'https://microsoc-backend.onrender.com/api';
+}
+
+function loadStoredLogs() {
+    try {
+        const stored = JSON.parse(localStorage.getItem(LOG_STORAGE_KEY) || '[]');
+        return Array.isArray(stored) ? stored : [];
+    } catch (error) {
+        return [];
+    }
+}
+
+function saveStoredLogs() {
+    const sortedLogs = [...allLogs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    allLogs = sortedLogs.slice(0, MAX_STORED_LOGS);
+    localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(allLogs));
+    window.dispatchEvent(new CustomEvent('microsoc:logs-updated', { detail: { logs: allLogs } }));
+}
+
+function syncFilteredLogs() {
+    filterLogs();
+}
 
 // Initialize Logs
 function initLogs() {
-    // Generate initial logs
-    generateMockLogs(100);
+    allLogs = loadStoredLogs().sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    filteredLogs = [...allLogs];
     
     // Setup multi-select styling
     setupMultiSelect();
+    document.querySelectorAll('#filter-severity option, #filter-type option').forEach(option => {
+        option.selected = true;
+    });
+
+    const liveBtn = document.getElementById('live-btn');
+    const pauseBtn = document.getElementById('pause-btn');
+    if (liveBtn) liveBtn.disabled = false;
+    if (pauseBtn) pauseBtn.disabled = true;
     
     // Update stats
     updateLogStats();
@@ -57,6 +91,7 @@ function generateMockLogs(count) {
     // Sort by timestamp (newest first)
     allLogs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     filteredLogs = [...allLogs];
+    saveStoredLogs();
 }
 
 // Generate Log Description
@@ -109,7 +144,16 @@ function renderLogs() {
     const container = document.getElementById('logs-container');
     if (!container) return;
     
-    container.innerHTML = currentLogs.map(log => `
+    if (!currentLogs.length) {
+        container.innerHTML = `
+            <tr>
+                <td colspan="9" style="text-align: center; padding: 24px;">
+                    No logs match the current filters. Start live stream to detect new attacks.
+                </td>
+            </tr>
+        `;
+    } else {
+        container.innerHTML = currentLogs.map(log => `
         <tr class="log-row" data-id="${log.id}">
             <td>
                 <input type="checkbox" class="log-checkbox" 
@@ -157,7 +201,7 @@ function renderLogs() {
                     <button class="btn-icon" onclick="viewLogDetail(${log.id})" title="View Details">
                         <i class="fas fa-eye"></i>
                     </button>
-                    <button class="btn-icon" onclick="showRemediation('${log.attackType}')" title="Remediation">
+                    <button class="btn-icon" onclick="showRemediation(${log.id})" title="AI Prevention">
                         <i class="fas fa-lightbulb"></i>
                     </button>
                     <button class="btn-icon ai-action-btn" onclick="explainLogWithAI(${log.id})" title="AI Explain">
@@ -170,6 +214,7 @@ function renderLogs() {
             </td>
         </tr>
     `).join('');
+    }
     
     // Update counts
     document.getElementById('showing-count').textContent = currentLogs.length;
@@ -289,15 +334,8 @@ function resetFilters() {
     document.getElementById('filter-time').value = '24h';
     document.getElementById('search-logs').value = '';
     
-    // Re-select default values
-    ['critical', 'high', 'medium'].forEach(value => {
-        const option = document.querySelector(`#filter-severity option[value="${value}"]`);
-        if (option) option.selected = true;
-    });
-    
-    ['XSS', 'SQL Injection', 'Port Scan', 'Brute Force'].forEach(value => {
-        const option = document.querySelector(`#filter-type option[value="${value}"]`);
-        if (option) option.selected = true;
+    document.querySelectorAll('#filter-severity option, #filter-type option').forEach(option => {
+        option.selected = true;
     });
     
     filteredLogs = [...allLogs];
@@ -307,7 +345,7 @@ function resetFilters() {
 
 // Pagination Functions
 function updatePagination() {
-    totalPages = Math.ceil(filteredLogs.length / itemsPerPage);
+    totalPages = Math.max(1, Math.ceil(filteredLogs.length / itemsPerPage));
     
     document.getElementById('current-page').textContent = currentPage;
     document.getElementById('total-pages').textContent = totalPages;
@@ -349,6 +387,7 @@ function startLiveStream() {
     liveStreamInterval = setInterval(() => {
         addNewLiveLog();
     }, 3000);
+    addNewLiveLog();
 }
 
 function pauseLiveStream() {
@@ -364,16 +403,18 @@ function pauseLiveStream() {
 function addNewLiveLog() {
     const attackTypes = ['XSS', 'SQL Injection', 'Port Scan', 'Brute Force', 'DDoS'];
     const severities = ['critical', 'high', 'medium', 'low'];
+    const attackType = attackTypes[Math.floor(Math.random() * attackTypes.length)];
+    const targetSystem = ['web-server-01', 'db-server-01', 'auth-server-01', 'api-gateway', 'firewall-01'][Math.floor(Math.random() * 5)];
     
     const newLog = {
-        id: allLogs.length + 1,
+        id: Date.now(),
         timestamp: new Date().toISOString(),
-        attackType: attackTypes[Math.floor(Math.random() * attackTypes.length)],
+        attackType,
         sourceIP: generateIP(),
-        targetSystem: 'live-system',
+        targetSystem,
         severity: severities[Math.floor(Math.random() * severities.length)],
-        country: ['USA', 'China', 'Russia', 'Germany'][Math.floor(Math.random() * 4)],
-        description: `Real-time ${attackTypes[Math.floor(Math.random() * attackTypes.length)]} attack detected`,
+        country: ['USA', 'China', 'Russia', 'Germany', 'India', 'Brazil'][Math.floor(Math.random() * 6)],
+        description: buildLiveDescription(attackType, targetSystem),
         isBlocked: Math.random() > 0.5,
         userAgent: 'Live Stream',
         port: Math.floor(Math.random() * 65535),
@@ -382,21 +423,29 @@ function addNewLiveLog() {
     
     // Add to beginning of arrays
     allLogs.unshift(newLog);
-    filteredLogs.unshift(newLog);
+    saveStoredLogs();
+    syncFilteredLogs();
     
     // Update stats
     updateLogStats();
-    
-    // Reload current page (logs will shift)
-    loadLogsForPage();
-    
-    // Show notification for critical logs
-    if (newLog.severity === 'critical') {
-        showNotification(`Critical ${newLog.attackType} attack detected from ${newLog.sourceIP}`, 'error', {
-            title: 'Critical Attack Detected',
-            meta: `${newLog.targetSystem} | ${newLog.protocol}/${newLog.port}`
-        });
-    }
+
+    const notificationType = ['critical', 'high'].includes(newLog.severity) ? 'error' : 'warning';
+    showNotification(`${newLog.severity.toUpperCase()} ${newLog.attackType} from ${newLog.sourceIP}`, notificationType, {
+        title: newLog.isBlocked ? 'Attack Detected and Blocked' : 'Active Attack Detected',
+        meta: `${newLog.targetSystem} | ${newLog.protocol}/${newLog.port} | ${newLog.country}`
+    });
+}
+
+function buildLiveDescription(attackType, targetSystem) {
+    const descriptions = {
+        'XSS': `Script injection payload detected against ${targetSystem}`,
+        'SQL Injection': `SQL payload detected in request targeting ${targetSystem}`,
+        'Port Scan': `Sequential port probe detected against ${targetSystem}`,
+        'Brute Force': `Repeated authentication attempts detected on ${targetSystem}`,
+        'DDoS': `Traffic burst consistent with DDoS detected against ${targetSystem}`
+    };
+
+    return descriptions[attackType] || `Suspicious activity detected against ${targetSystem}`;
 }
 
 // Log Selection Functions
@@ -527,8 +576,8 @@ function viewLogDetail(logId) {
                     <button class="btn btn-primary" onclick="createIncidentFromLog(${log.id}); closeLogModal()">
                         <i class="fas fa-exclamation-triangle"></i> Create Incident
                     </button>
-                    <button class="btn btn-outline" onclick="showRemediation('${log.attackType}')">
-                        <i class="fas fa-lightbulb"></i> View Remediation
+                    <button class="btn btn-outline" onclick="showRemediation(${log.id})">
+                        <i class="fas fa-lightbulb"></i> AI Prevention
                     </button>
                     <button class="btn btn-outline" onclick="exportSingleLog(${log.id})">
                         <i class="fas fa-download"></i> Export Log
@@ -547,67 +596,58 @@ function closeLogModal() {
 }
 
 // Show Remediation Suggestions
-function showRemediation(attackType) {
-    const suggestions = {
-        'XSS': [
-            'Implement Content Security Policy (CSP) headers',
-            'Sanitize user input on both client and server side',
-            'Use secure frameworks that auto-escape XSS',
-            'Enable XSS filters in web browsers',
-            'Regularly update web application firewalls'
-        ],
-        'SQL Injection': [
-            'Use prepared statements and parameterized queries',
-            'Implement stored procedures',
-            'Apply principle of least privilege to database accounts',
-            'Regularly update and patch database software',
-            'Use web application firewalls with SQLi protection'
-        ],
-        'Port Scan': [
-            'Configure firewall to block port scanning attempts',
-            'Implement intrusion detection systems (IDS)',
-            'Use port knocking techniques',
-            'Limit exposed ports to essential services only',
-            'Monitor network traffic for scanning patterns'
-        ],
-        'Brute Force': [
-            'Implement account lockout policies',
-            'Use CAPTCHA after failed attempts',
-            'Enable multi-factor authentication',
-            'Implement rate limiting on login endpoints',
-            'Use strong password policies'
-        ],
-        'DDoS': [
-            'Use DDoS protection services (Cloudflare, Akamai)',
-            'Implement rate limiting and throttling',
-            'Use load balancers to distribute traffic',
-            'Configure firewalls to block suspicious traffic',
-            'Monitor network traffic patterns'
-        ]
-    };
-    
+async function showRemediation(logId) {
+    const log = allLogs.find(l => l.id === logId) || allLogs.find(l => l.attackType === logId);
+    if (!log) return;
+
     const content = document.getElementById('remediation-content');
-    const suggestionsList = suggestions[attackType] || [
-        'Analyze attack pattern',
-        'Update security rules',
-        'Monitor for similar attacks',
-        'Review system logs'
-    ];
-    
     content.innerHTML = `
-        <h4>Remediation for ${attackType}</h4>
-        <p>Recommended actions to mitigate this type of attack:</p>
-        <ul class="remediation-list">
-            ${suggestionsList.map(suggestion => `<li>${suggestion}</li>`).join('')}
-        </ul>
-        <div class="mt-20">
-            <button class="btn btn-primary" onclick="closeRemediationModal()">
-                <i class="fas fa-check"></i> Understood
-            </button>
-        </div>
+        <h4>AI prevention analysis for ${escapeHtml(log.attackType)}</h4>
+        <p><i class="fas fa-spinner fa-spin"></i> Asking MicroSOC AI how to prevent this attack...</p>
     `;
-    
     document.getElementById('remediation-modal').classList.remove('hidden');
+
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/ai/explain-log`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+            },
+            body: JSON.stringify({ log })
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.message || 'AI remediation failed');
+        }
+
+        const result = payload.data || {};
+        const actions = result.recommendedActions || [];
+        const containment = result.containment || [];
+        const evidence = result.evidenceNeeded || [];
+
+        content.innerHTML = `
+            <h4>${escapeHtml(result.title || `${log.attackType} prevention`)}</h4>
+            <p>${escapeHtml(result.summary || result.likelyIntent || log.description)}</p>
+            ${actions.length ? `<strong>Prevention actions</strong><ul class="remediation-list">${actions.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
+            ${containment.length ? `<strong>Immediate containment</strong><ul class="remediation-list">${containment.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
+            ${evidence.length ? `<strong>Evidence to review</strong><ul class="remediation-list">${evidence.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
+            <div class="mt-20">
+                <button class="btn btn-primary" onclick="closeRemediationModal()">
+                    <i class="fas fa-check"></i> Understood
+                </button>
+            </div>
+        `;
+    } catch (error) {
+        console.error('AI remediation failed:', error);
+        content.innerHTML = `
+            <h4>AI prevention unavailable</h4>
+            <p>Could not generate prevention guidance right now. Please check backend login/session.</p>
+            <div class="mt-20">
+                <button class="btn btn-primary" onclick="closeRemediationModal()">Close</button>
+            </div>
+        `;
+    }
 }
 
 // Close Remediation Modal
@@ -683,7 +723,7 @@ async function explainLogWithAI(logId) {
     showNotification('AI is explaining this log...', 'info');
 
     try {
-        const response = await fetch('https://microsoc-backend.onrender.com/api/ai/explain-log', {
+        const response = await fetch(`${getApiBaseUrl()}/ai/explain-log`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -748,7 +788,7 @@ async function persistIncident(incident) {
         impact: incident.severity
     };
 
-    const response = await fetch('https://microsoc-backend.onrender.com/api/incidents', {
+    const response = await fetch(`${getApiBaseUrl()}/incidents`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -918,9 +958,7 @@ function clearLogs() {
         filteredLogs = [];
         selectedLogs.clear();
         currentPage = 1;
-        
-        // Regenerate some logs
-        generateMockLogs(50);
+        saveStoredLogs();
         loadLogsForPage();
         updateLogStats();
         
@@ -939,6 +977,8 @@ function deleteSelectedLogs() {
         // Remove selected logs
         allLogs = allLogs.filter(log => !selectedLogs.has(log.id));
         filteredLogs = filteredLogs.filter(log => !selectedLogs.has(log.id));
+        const deletedCount = selectedLogs.size;
+        saveStoredLogs();
         
         // Clear selection
         clearSelection();
@@ -947,7 +987,7 @@ function deleteSelectedLogs() {
         loadLogsForPage();
         updateLogStats();
         
-        showNotification(`${selectedLogs.size} logs deleted`, 'success');
+        showNotification(`${deletedCount} logs deleted`, 'success');
     }
 }
 

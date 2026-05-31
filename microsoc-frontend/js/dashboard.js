@@ -5,7 +5,6 @@ function initDashboard() {
     loadStats();
     loadAttackTrends();
     loadTopAttackers();
-    startLogStream();
     initCharts();
 }
 
@@ -240,7 +239,6 @@ function clearLogs() {
     const container = document.getElementById('realtime-logs');
     if (container) {
         container.innerHTML = '';
-        generateLogs(container, 5); // Add initial logs back
     }
 }
 

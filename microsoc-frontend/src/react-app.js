@@ -15,6 +15,12 @@
     const protectedRoutes = new Set(['dashboard', 'incidents', 'logs', 'analytics']);
     const loadedExternalScripts = new Set();
     const pages = window.MICROSOC_PAGES || {};
+    const LOCAL_API_BASE_URL = 'http://localhost:5001/api';
+    const HOSTED_API_BASE_URL = 'https://microsoc-backend.onrender.com/api';
+
+    window.MICROSOC_API_BASE_URL = ['localhost', '127.0.0.1'].includes(window.location.hostname)
+        ? LOCAL_API_BASE_URL
+        : HOSTED_API_BASE_URL;
 
     function getRouteFromHash() {
         const route = window.location.hash.replace(/^#\/?/, '').split('?')[0];
@@ -30,6 +36,8 @@
 
     function patchLegacyNavigation(code) {
         return code
+            .replace(/https:\/\/microsoc-backend\.onrender\.com\/api/g, window.MICROSOC_API_BASE_URL)
+            .replace(/,\s*startLogStream\(\)\s*(?=\])/g, '')
             .replace(
                 /localStorage\.setItem\('user',\s*JSON\.stringify\(user\)\);/g,
                 "localStorage.setItem('user', JSON.stringify(user)); localStorage.setItem('token', localStorage.getItem('token') || 'demo-token');"
@@ -176,7 +184,7 @@
             const thinking = appendAIMessage(messages, 'Thinking...', 'assistant');
 
             try {
-                const response = await fetch('https://microsoc-backend.onrender.com/api/ai/chat', {
+                const response = await fetch(`${window.MICROSOC_API_BASE_URL}/ai/chat`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',

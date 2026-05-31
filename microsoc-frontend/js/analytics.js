@@ -14,40 +14,57 @@ let analyticsData = {
     aiInsights: []
 };
 
-const attackTypes = [
-    "Brute Force",
-    "SQL Injection",
-    "XSS Attempt",
-    "DDoS Attack",
-    "Malware Detected",
-    "Port Scanning"
-];
+const LOG_STORAGE_KEY = 'microsocSecurityLogs';
 
-function addThreatFeedItem() {
-    const feed = document.getElementById("threatFeed");
-    if (!feed) return;
+function getApiBaseUrl() {
+    return window.MICROSOC_API_BASE_URL || 'https://microsoc-backend.onrender.com/api';
+}
 
-    const attack = attackTypes[Math.floor(Math.random() * attackTypes.length)];
-    const time = new Date().toLocaleTimeString();
-
-    const li = document.createElement("li");
-    li.textContent = `[${time}] ${attack} detected`;
-
-    feed.prepend(li);
-
-    // limit feed size
-    if (feed.children.length > 10) {
-        feed.removeChild(feed.lastChild);
+function getStoredSecurityLogs() {
+    try {
+        const logs = JSON.parse(localStorage.getItem(LOG_STORAGE_KEY) || '[]');
+        return Array.isArray(logs)
+            ? logs.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+            : [];
+    } catch (error) {
+        return [];
     }
 }
 
-function startThreatFeed() {
-    setInterval(addThreatFeedItem, 4000);
+function getAnalyticsTimeWindow() {
+    const value = document.getElementById('time-period')?.value || '7d';
+    const now = Date.now();
+    const windows = {
+        '24h': 24 * 60 * 60 * 1000,
+        '7d': 7 * 24 * 60 * 60 * 1000,
+        '30d': 30 * 24 * 60 * 60 * 1000
+    };
+    return { value, since: now - (windows[value] || windows['7d']) };
+}
+
+function getAnalyticsLogs() {
+    const { since } = getAnalyticsTimeWindow();
+    return getStoredSecurityLogs().filter(log => new Date(log.timestamp).getTime() >= since);
+}
+
+function countBy(items, keyGetter) {
+    return items.reduce((acc, item) => {
+        const key = keyGetter(item) || 'Unknown';
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+    }, {});
+}
+
+function severityWeight(severity) {
+    return { critical: 95, high: 75, medium: 50, low: 25 }[String(severity).toLowerCase()] || 35;
+}
+
+function formatEmptyState(message) {
+    return `<div style="padding: 18px; color: var(--text-secondary);">${escapeHtml(message)}</div>`;
 }
 
 // Initialize Analytics
 function initAnalytics() {
-    // Load mock data
     loadAnalyticsData();
     
     // Initialize charts
@@ -74,78 +91,63 @@ function initAnalytics() {
     // Update stats
     updateAnalyticsStats();
 
-    startLiveSimulation();
-
-    startThreatFeed();
+    window.addEventListener('microsoc:logs-updated', updateAnalytics);
 
 }
 
 // Load Analytics Data
 function loadAnalyticsData() {
-    // Attack Distribution Data
+    const logs = getAnalyticsLogs();
+    const typeCounts = countBy(logs, log => log.attackType);
+    const labels = Object.keys(typeCounts);
+    const colors = ['#dc3545', '#fd7e14', '#ffc107', '#28a745', '#17a2b8', '#6f42c1', '#e83e8c', '#0d6efd'];
+
     analyticsData.attackDistribution = {
-        labels: ['XSS', 'SQL Injection', 'Port Scan', 'Brute Force', 'DDoS', 'Malware', 'Phishing'],
+        labels: labels.length ? labels : ['No attacks'],
         datasets: [{
-            data: [25, 20, 18, 15, 10, 8, 4],
-            backgroundColor: [
-                '#dc3545', '#fd7e14', '#ffc107', '#28a745',
-                '#17a2b8', '#6f42c1', '#e83e8c'
-            ]
+            data: labels.length ? labels.map(label => typeCounts[label]) : [0],
+            backgroundColor: labels.length ? labels.map((_, index) => colors[index % colors.length]) : ['#6c757d']
         }]
     };
     
-    // Threat Timeline Data
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const { value } = getAnalyticsTimeWindow();
+    const labelsForPeriod = value === '24h'
+        ? Array.from({ length: 6 }, (_, index) => `${String(index * 4).padStart(2, '0')}:00`)
+        : value === '30d'
+            ? ['Week 1', 'Week 2', 'Week 3', 'Week 4']
+            : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const severities = ['critical', 'high', 'medium'];
+
     analyticsData.threatTimeline = {
-        labels: days,
-        datasets: [
-            {
-                label: 'Critical',
-                data: days.map(() => Math.floor(Math.random() * 20) + 5),
-                borderColor: '#dc3545',
-                backgroundColor: 'rgba(220, 53, 69, 0.1)',
-                tension: 0.4
-            },
-            {
-                label: 'High',
-                data: days.map(() => Math.floor(Math.random() * 30) + 10),
-                borderColor: '#fd7e14',
-                backgroundColor: 'rgba(253, 126, 20, 0.1)',
-                tension: 0.4
-            },
-            {
-                label: 'Medium',
-                data: days.map(() => Math.floor(Math.random() * 40) + 15),
-                borderColor: '#ffc107',
-                backgroundColor: 'rgba(255, 193, 7, 0.1)',
-                tension: 0.4
-            }
-        ]
+        labels: labelsForPeriod,
+        datasets: severities.map(severity => ({
+            label: severity.charAt(0).toUpperCase() + severity.slice(1),
+            data: buildTimelineSeries(logs, labelsForPeriod, value, severity),
+            borderColor: getSeverityColor(severity),
+            backgroundColor: `${getSeverityColor(severity)}22`,
+            tension: 0.4
+        }))
     };
 }
-function startLiveSimulation() {
-    setInterval(() => {
-        // Random attack count increase
-        analyticsData.attackDistribution.datasets[0].data =
-            analyticsData.attackDistribution.datasets[0].data.map(
-                val => val + Math.floor(Math.random() * 3)
-            );
 
-        // Update doughnut chart
-        if (attackDistributionChart instanceof Chart) {
-            attackDistributionChart.update();
-        }
-
-        // Timeline chart update
-        const timelineData = analyticsData.threatTimeline.datasets[0].data;
-        timelineData.shift();
-        timelineData.push(Math.floor(Math.random() * 20));
-
-        if (window.threatTimelineChart instanceof Chart) {
-            window.threatTimelineChart.update();
-        }
-
-    }, 3000); // every 3 sec
+function buildTimelineSeries(logs, labels, period, severity) {
+    const counts = labels.map(() => 0);
+    logs
+        .filter(log => log.severity === severity)
+        .forEach(log => {
+            const date = new Date(log.timestamp);
+            let index = 0;
+            if (period === '24h') {
+                index = Math.min(labels.length - 1, Math.floor(date.getHours() / 4));
+            } else if (period === '30d') {
+                index = Math.min(labels.length - 1, Math.floor((Date.now() - date.getTime()) / (7 * 24 * 60 * 60 * 1000)));
+                index = labels.length - 1 - index;
+            } else {
+                index = date.getDay();
+            }
+            counts[index] += 1;
+        });
+    return counts;
 }
 
 // Initialize Charts
@@ -233,7 +235,7 @@ function createAttackDistributionLegend() {
     const total = data.reduce((a, b) => a + b, 0);
     
     legendContainer.innerHTML = analyticsData.attackDistribution.labels.map((label, index) => {
-        const percentage = Math.round((data[index] / total) * 100);
+        const percentage = total ? Math.round((data[index] / total) * 100) : 0;
         return `
             <div class="legend-item">
                 <span class="legend-color" style="background: ${colors[index]}"></span>
@@ -256,65 +258,46 @@ function toggleTimelineView() {
 
 // Load Patterns
 function loadPatterns() {
-    const patterns = [
-        {
-            id: 1,
-            name: 'Distributed Brute Force',
-            confidence: 92,
-            description: 'Multiple IP addresses targeting same credentials within 5-minute window',
-            type: 'Brute Force',
-            frequency: '45 attacks/hour',
-            timeframe: 'Last 24 hours',
-            severity: 'High'
-        },
-        {
-            id: 2,
-            name: 'Port Scan Cascade',
-            confidence: 87,
-            description: 'Sequential port scanning from same subnet',
-            type: 'Port Scan',
-            frequency: '120 scans/minute',
-            timeframe: 'Last 2 hours',
-            severity: 'Medium'
-        },
-        {
-            id: 3,
-            name: 'XSS Payload Pattern',
-            confidence: 95,
-            description: 'Similar XSS payloads across multiple endpoints',
-            type: 'XSS',
-            frequency: '18 attacks',
-            timeframe: 'Last 6 hours',
-            severity: 'High'
-        },
-        {
-            id: 4,
-            name: 'SQL Injection Pattern',
-            confidence: 84,
-            description: 'Common SQL injection attempts on login forms',
-            type: 'SQL Injection',
-            frequency: '32 attempts',
-            timeframe: 'Last 12 hours',
-            severity: 'Critical'
-        },
-        {
-            id: 5,
-            name: 'Geolocation Cluster',
-            confidence: 78,
-            description: 'Attacks originating from same geographic region',
+    const logs = getAnalyticsLogs();
+    const byType = countBy(logs, log => log.attackType);
+    const byCountry = countBy(logs, log => log.country);
+    const patterns = Object.entries(byType)
+        .filter(([, count]) => count >= 2)
+        .map(([type, count], index) => {
+            const related = logs.filter(log => log.attackType === type);
+            const highest = ['critical', 'high', 'medium', 'low'].find(level => related.some(log => log.severity === level)) || 'medium';
+            return {
+                id: index + 1,
+                name: `${type} cluster`,
+                confidence: Math.min(98, 60 + count * 8),
+                description: `${count} ${type} event${count === 1 ? '' : 's'} detected in the selected time window`,
+                type,
+                frequency: `${count} events`,
+                timeframe: document.getElementById('time-period')?.selectedOptions?.[0]?.textContent || 'Selected window',
+                severity: highest.charAt(0).toUpperCase() + highest.slice(1)
+            };
+        });
+
+    const countryCluster = Object.entries(byCountry).sort((a, b) => b[1] - a[1])[0];
+    if (countryCluster && countryCluster[1] >= 3) {
+        patterns.push({
+            id: patterns.length + 1,
+            name: `${countryCluster[0]} source concentration`,
+            confidence: Math.min(95, 55 + countryCluster[1] * 5),
+            description: `${countryCluster[1]} events came from ${countryCluster[0]} in the selected time window`,
             type: 'Geographic',
-            frequency: '89 attacks',
-            timeframe: 'Last 48 hours',
+            frequency: `${countryCluster[1]} events`,
+            timeframe: document.getElementById('time-period')?.selectedOptions?.[0]?.textContent || 'Selected window',
             severity: 'Medium'
-        }
-    ];
+        });
+    }
     
     analyticsData.patterns = patterns;
     
     const container = document.getElementById('patterns-list');
     if (!container) return;
     
-    container.innerHTML = patterns.map(pattern => `
+    container.innerHTML = patterns.length ? patterns.map(pattern => `
         <div class="pattern-item" onclick="showPatternDetail(${pattern.id})">
             <div class="pattern-header">
                 <span class="pattern-name">${pattern.name}</span>
@@ -327,7 +310,7 @@ function loadPatterns() {
                 <span><i class="fas fa-clock"></i> ${pattern.timeframe}</span>
             </div>
         </div>
-    `).join('');
+    `).join('') : formatEmptyState('No repeat attack patterns yet. Start live stream or widen the time period.');
     
     document.getElementById('patterns-detected').textContent = `${patterns.length} patterns`;
 }
@@ -370,39 +353,7 @@ function showPatternDetail(patternId) {
                         <div class="stat-label">Timeframe</div>
                         <div class="stat-value">${pattern.timeframe}</div>
                     </div>
-                    <div class="stat">
-                        <div class="stat-label">First Detected</div>
-                        <div class="stat-value">${timeAgo(new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString())}</div>
-                    </div>
                 </div>
-            </div>
-            
-            <div class="detail-section">
-                <h5><i class="fas fa-exclamation-triangle"></i> Impact Assessment</h5>
-                <div class="impact-assessment">
-                    <div class="impact-factor">
-                        <span class="factor-name">Potential Damage</span>
-                        <span class="factor-rating high">High</span>
-                    </div>
-                    <div class="impact-factor">
-                        <span class="factor-name">Spread Potential</span>
-                        <span class="factor-rating medium">Medium</span>
-                    </div>
-                    <div class="impact-factor">
-                        <span class="factor-name">Detection Difficulty</span>
-                        <span class="factor-rating low">Low</span>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="detail-section">
-                <h5><i class="fas fa-lightbulb"></i> Recommended Actions</h5>
-                <ul class="recommendations">
-                    <li>Update firewall rules to block source IPs</li>
-                    <li>Implement rate limiting on affected endpoints</li>
-                    <li>Review and update security configurations</li>
-                    <li>Monitor for similar patterns</li>
-                </ul>
             </div>
         </div>
     `;
@@ -423,29 +374,29 @@ function createIncidentFromPattern() {
 
 // Load Top Sources
 function loadTopSources() {
-    const sources = [
-        { ip: '192.168.1.105', country: 'US', attacks: 245, location: 'New York, USA' },
-        { ip: '10.0.0.42', country: 'CN', attacks: 189, location: 'Beijing, China' },
-        { ip: '172.16.0.88', country: 'RU', attacks: 156, location: 'Moscow, Russia' },
-        { ip: '203.0.113.25', country: 'DE', attacks: 98, location: 'Berlin, Germany' },
-        { ip: '198.51.100.13', country: 'IN', attacks: 134, location: 'Mumbai, India' },
-        { ip: '203.0.113.17', country: 'BR', attacks: 87, location: 'São Paulo, Brazil' },
-        { ip: '192.0.2.8', country: 'JP', attacks: 76, location: 'Tokyo, Japan' },
-        { ip: '198.51.100.42', country: 'KR', attacks: 65, location: 'Seoul, South Korea' }
-    ];
+    const logs = getAnalyticsLogs();
+    const grouped = logs.reduce((acc, log) => {
+        acc[log.sourceIP] = acc[log.sourceIP] || { ip: log.sourceIP, country: log.country, attacks: 0, lastSeen: log.timestamp };
+        acc[log.sourceIP].attacks += 1;
+        if (new Date(log.timestamp) > new Date(acc[log.sourceIP].lastSeen)) {
+            acc[log.sourceIP].lastSeen = log.timestamp;
+        }
+        return acc;
+    }, {});
+    const sources = Object.values(grouped).sort((a, b) => b.attacks - a.attacks).slice(0, 8);
     
     analyticsData.topSources = sources;
     
     const container = document.getElementById('top-sources');
     if (!container) return;
     
-    container.innerHTML = sources.map(source => `
+    container.innerHTML = sources.length ? sources.map(source => `
         <div class="source-item">
             <div class="source-info">
                 <span class="source-country">${getCountryFlag(source.country)}</span>
                 <div class="source-details">
                     <span class="source-ip">${source.ip}</span>
-                    <span class="source-count">${source.location}</span>
+                    <span class="source-count">Last seen ${timeAgo(source.lastSeen)}</span>
                 </div>
             </div>
             <div class="source-attacks">
@@ -453,7 +404,7 @@ function loadTopSources() {
                 <span class="attack-label">attacks</span>
             </div>
         </div>
-    `).join('');
+    `).join('') : formatEmptyState('No source data yet.');
 }
 
 // Show Geo Map
@@ -462,29 +413,19 @@ function showGeoMap() {
     const container = document.getElementById('world-map');
     if (!container) return;
     
+    const countries = countBy(getAnalyticsLogs(), log => log.country);
+    const positions = {
+        USA: [30, 25], China: [35, 75], Russia: [25, 65], Germany: [40, 48],
+        India: [45, 70], Brazil: [55, 30], Japan: [40, 85], UK: [36, 46], France: [42, 47]
+    };
     container.innerHTML = `
         <div class="world-map-visualization">
-            <div class="map-point" style="top: 30%; left: 25%; background: #dc3545;" data-country="USA">
-                <div class="map-tooltip">USA: 245 attacks</div>
-            </div>
-            <div class="map-point" style="top: 35%; left: 75%; background: #dc3545;" data-country="China">
-                <div class="map-tooltip">China: 189 attacks</div>
-            </div>
-            <div class="map-point" style="top: 25%; left: 65%; background: #fd7e14;" data-country="Russia">
-                <div class="map-tooltip">Russia: 156 attacks</div>
-            </div>
-            <div class="map-point" style="top: 40%; left: 48%; background: #ffc107;" data-country="Germany">
-                <div class="map-tooltip">Germany: 98 attacks</div>
-            </div>
-            <div class="map-point" style="top: 45%; left: 70%; background: #fd7e14;" data-country="India">
-                <div class="map-tooltip">India: 134 attacks</div>
-            </div>
-            <div class="map-point" style="top: 55%; left: 30%; background: #28a745;" data-country="Brazil">
-                <div class="map-tooltip">Brazil: 87 attacks</div>
-            </div>
-            <div class="map-point" style="top: 40%; left: 85%; background: #ffc107;" data-country="Japan">
-                <div class="map-tooltip">Japan: 76 attacks</div>
-            </div>
+            ${Object.entries(countries).map(([country, count]) => {
+                const [top, left] = positions[country] || [50, 50];
+                return `<div class="map-point" style="top: ${top}%; left: ${left}%; background: ${count > 5 ? '#dc3545' : count > 2 ? '#fd7e14' : '#28a745'};" data-country="${escapeHtml(country)}">
+                    <div class="map-tooltip">${escapeHtml(country)}: ${count} attacks</div>
+                </div>`;
+            }).join('') || formatEmptyState('No geo data yet.')}
         </div>
     `;
     
@@ -498,39 +439,55 @@ function closeGeoMap() {
 
 // Load Anomalies
 function loadAnomalies() {
-    const anomalies = [
-        {
+    const logs = getAnalyticsLogs();
+    const activeHigh = logs.filter(log => !log.isBlocked && ['critical', 'high'].includes(log.severity));
+    const repeatedSources = Object.values(logs.reduce((acc, log) => {
+        acc[log.sourceIP] = acc[log.sourceIP] || [];
+        acc[log.sourceIP].push(log);
+        return acc;
+    }, {})).filter(group => group.length >= 3);
+    const unusualPorts = logs.filter(log => Number(log.port) > 49151);
+    const anomalies = [];
+
+    if (activeHigh.length) {
+        anomalies.push({
             id: 1,
-            title: 'Unusual Outbound Traffic Spike',
-            severity: 'Critical',
-            description: '5000% increase in outbound traffic detected at 02:45 AM',
-            timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-            confidence: 96
-        },
-        {
-            id: 2,
-            title: 'Suspicious Login Pattern',
-            severity: 'High',
-            description: 'Multiple failed login attempts from geographically dispersed locations',
-            timestamp: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
-            confidence: 87
-        },
-        {
-            id: 3,
-            title: 'Anomalous Port Activity',
+            title: 'Unblocked high-risk events',
+            severity: activeHigh.some(log => log.severity === 'critical') ? 'Critical' : 'High',
+            description: `${activeHigh.length} critical/high event${activeHigh.length === 1 ? '' : 's'} remain active in the selected window`,
+            timestamp: activeHigh[0].timestamp,
+            confidence: Math.min(98, 70 + activeHigh.length * 5)
+        });
+    }
+
+    repeatedSources.slice(0, 2).forEach((group, index) => {
+        anomalies.push({
+            id: anomalies.length + index + 1,
+            title: `Repeated source ${group[0].sourceIP}`,
+            severity: group.some(log => log.severity === 'critical') ? 'Critical' : 'High',
+            description: `${group.length} events from the same source targeting ${[...new Set(group.map(log => log.targetSystem))].join(', ')}`,
+            timestamp: group[0].timestamp,
+            confidence: Math.min(96, 65 + group.length * 6)
+        });
+    });
+
+    if (unusualPorts.length) {
+        anomalies.push({
+            id: anomalies.length + 1,
+            title: 'High ephemeral port activity',
             severity: 'Medium',
-            description: 'Unusual traffic on non-standard port 4444',
-            timestamp: new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString(),
-            confidence: 78
-        }
-    ];
+            description: `${unusualPorts.length} events touched high-numbered ports in the selected window`,
+            timestamp: unusualPorts[0].timestamp,
+            confidence: Math.min(90, 55 + unusualPorts.length * 4)
+        });
+    }
     
     analyticsData.anomalies = anomalies;
     
     const container = document.getElementById('anomalies-container');
     if (!container) return;
     
-    container.innerHTML = anomalies.map(anomaly => `
+    container.innerHTML = anomalies.length ? anomalies.map(anomaly => `
         <div class="anomaly-item">
             <div class="anomaly-header">
                 <span class="anomaly-title">${anomaly.title}</span>
@@ -541,58 +498,36 @@ function loadAnomalies() {
                 <i class="fas fa-clock"></i> Detected ${timeAgo(anomaly.timestamp)}
             </div>
         </div>
-    `).join('');
+    `).join('') : formatEmptyState('No anomalies detected from current logs.');
     
     document.getElementById('anomalies-count').textContent = `${anomalies.length} anomalies`;
 }
 
 // Load Remediations
 function loadRemediations() {
-    const remediations = [
-        {
-            id: 1,
-            title: 'Implement WAF Rules for XSS',
-            priority: 'High',
-            steps: 'Add regex-based WAF rules to detect and block XSS payloads',
-            impact: 'Reduces XSS attacks by 95%',
-            effort: '2 hours',
-            effectiveness: 92
-        },
-        {
-            id: 2,
-            title: 'Enable MFA for Admin Accounts',
-            priority: 'Critical',
-            steps: 'Configure multi-factor authentication for all administrative accounts',
-            impact: 'Prevents 99% of credential-based attacks',
-            effort: '4 hours',
-            effectiveness: 98
-        },
-        {
-            id: 3,
-            title: 'Update Firewall Rules',
-            priority: 'Medium',
-            steps: 'Block traffic from high-risk countries and known malicious IPs',
-            impact: 'Reduces attack surface by 60%',
-            effort: '1 hour',
-            effectiveness: 85
-        },
-        {
-            id: 4,
-            title: 'Patch SQL Server Vulnerabilities',
-            priority: 'High',
-            steps: 'Apply latest security patches and updates to database servers',
-            impact: 'Closes 3 critical SQL injection vectors',
-            effort: '3 hours',
-            effectiveness: 96
-        }
-    ];
+    const logs = getAnalyticsLogs();
+    const topTypes = Object.entries(countBy(logs, log => log.attackType)).sort((a, b) => b[1] - a[1]).slice(0, 4);
+    const remediations = topTypes.map(([type, count], index) => {
+        const related = logs.filter(log => log.attackType === type);
+        const active = related.filter(log => !log.isBlocked).length;
+        const priority = related.some(log => log.severity === 'critical') ? 'Critical' : related.some(log => log.severity === 'high') ? 'High' : 'Medium';
+        return {
+            id: index + 1,
+            title: `Review controls for ${type}`,
+            priority,
+            steps: `${count} ${type} event${count === 1 ? '' : 's'} detected; ${active} active/unblocked. Use the log action AI button for event-specific prevention.`,
+            impact: `${Math.round((active / Math.max(count, 1)) * 100)}% currently unblocked`,
+            effort: 'Based on selected log window',
+            effectiveness: Math.max(0, Math.round((1 - active / Math.max(count, 1)) * 100))
+        };
+    });
     
     analyticsData.remediations = remediations;
     
     const container = document.getElementById('remediation-container');
     if (!container) return;
     
-    container.innerHTML = remediations.map(remediation => `
+    container.innerHTML = remediations.length ? remediations.map(remediation => `
         <div class="remediation-item">
             <div class="remediation-header">
                 <span class="remediation-title">${remediation.title}</span>
@@ -605,65 +540,38 @@ function loadRemediations() {
                 <i class="fas fa-bullseye"></i> Effectiveness: ${remediation.effectiveness}%
             </div>
         </div>
-    `).join('');
+    `).join('') : formatEmptyState('No remediation candidates until attacks are detected.');
 }
 
 // Generate Remediations
 function generateRemediations() {
-    // Simulate AI generating new remediations
-    const newRemediation = {
-        id: Date.now(),
-        title: 'Implement Behavioral Analytics',
-        priority: 'High',
-        steps: 'Deploy machine learning model to detect anomalous user behavior',
-        impact: 'Identifies 85% of insider threats',
-        effort: '8 hours',
-        effectiveness: 88
-    };
-    
-    analyticsData.remediations.unshift(newRemediation);
-    
-    // Reload remediations
     loadRemediations();
-    
-    showNotification('New remediation suggestions generated', 'success');
+    showNotification('Remediation suggestions recalculated from stored logs', 'success');
 }
 
 // Load Predictions
 function loadPredictions() {
-    const predictions = [
-        {
-            id: 1,
-            title: 'DDoS Attack Probability',
-            probability: 85,
-            description: 'High probability of DDoS attack within next 24 hours based on traffic patterns',
-            timeframe: 'Next 24 hours',
-            confidence: 78
-        },
-        {
-            id: 2,
-            title: 'Credential Stuffing Attack',
-            probability: 72,
-            description: 'Likely credential stuffing attack targeting user accounts',
-            timeframe: 'Next 12 hours',
-            confidence: 82
-        },
-        {
-            id: 3,
-            title: 'Ransomware Infection',
-            probability: 45,
-            description: 'Medium risk of ransomware based on recent phishing campaign',
-            timeframe: 'Next 48 hours',
-            confidence: 65
-        }
-    ];
+    const logs = getAnalyticsLogs();
+    const typeCounts = Object.entries(countBy(logs, log => log.attackType)).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    const predictions = typeCounts.map(([type, count], index) => {
+        const recent = logs.filter(log => log.attackType === type && Date.now() - new Date(log.timestamp).getTime() < 60 * 60 * 1000).length;
+        const probability = Math.min(92, 25 + count * 8 + recent * 12);
+        return {
+            id: index + 1,
+            title: `${type} continuation risk`,
+            probability,
+            description: `${count} ${type} event${count === 1 ? '' : 's'} in the selected window, with ${recent} in the last hour`,
+            timeframe: recent ? 'Next 1-4 hours' : 'Selected window trend',
+            confidence: Math.min(90, 50 + count * 7)
+        };
+    });
     
     analyticsData.predictions = predictions;
     
     const container = document.getElementById('predictions-container');
     if (!container) return;
     
-    container.innerHTML = predictions.map(prediction => `
+    container.innerHTML = predictions.length ? predictions.map(prediction => `
         <div class="prediction-item">
             <div class="prediction-header">
                 <span class="prediction-title">${prediction.title}</span>
@@ -674,56 +582,19 @@ function loadPredictions() {
                 <i class="fas fa-calendar-alt"></i> Timeframe: ${prediction.timeframe}
             </div>
         </div>
-    `).join('');
+    `).join('') : formatEmptyState('No predictions until log volume exists.');
     
     // Update prediction confidence
-    const avgConfidence = Math.round(predictions.reduce((acc, p) => acc + p.confidence, 0) / predictions.length);
-    document.getElementById('prediction-confidence').textContent = `${avgConfidence}% accuracy`;
+    const avgConfidence = predictions.length
+        ? Math.round(predictions.reduce((acc, p) => acc + p.confidence, 0) / predictions.length)
+        : 0;
+    document.getElementById('prediction-confidence').textContent = `${avgConfidence}% confidence`;
 }
 
 // Load AI Insights
 function loadAIInsights() {
-    const insights = [
-        {
-            id: 1,
-            title: 'Attack Pattern Shift Detected',
-            confidence: 92,
-            content: 'Analysis shows attackers are shifting from SQL injection to XSS attacks. This suggests improved database security but potential weaknesses in input validation.',
-            recommendations: [
-                'Review and update input validation mechanisms',
-                'Implement Content Security Policy (CSP)',
-                'Conduct security training on XSS prevention'
-            ],
-            timestamp: new Date().toISOString()
-        },
-        {
-            id: 2,
-            title: 'Geographic Attack Trends',
-            confidence: 85,
-            content: '65% of recent attacks originate from 3 countries: USA, China, and Russia. Consider implementing geo-blocking for non-essential services.',
-            recommendations: [
-                'Implement geographic IP blocking',
-                'Monitor traffic from high-risk regions',
-                'Review business requirements for international access'
-            ],
-            timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
-        },
-        {
-            id: 3,
-            title: 'Time-Based Attack Patterns',
-            confidence: 78,
-            content: 'Peak attack hours are between 2 AM - 5 AM UTC. This correlates with low staffing levels in your region.',
-            recommendations: [
-                'Increase monitoring during peak attack hours',
-                'Consider automated response systems',
-                'Review shift schedules for security team'
-            ],
-            timestamp: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString()
-        }
-    ];
-    
-    analyticsData.aiInsights = insights;
-    renderAIInsights(insights);
+    analyticsData.aiInsights = [];
+    renderAIInsights([]);
 }
 
 function escapeHtml(value) {
@@ -738,6 +609,11 @@ function escapeHtml(value) {
 function renderAIInsights(insights) {
     const container = document.getElementById('insights-container');
     if (!container) return;
+
+    if (!insights.length) {
+        container.innerHTML = formatEmptyState('Click Generate Insights to ask AI to analyze the currently stored logs.');
+        return;
+    }
     
     container.innerHTML = insights.map(insight => `
         <div class="insight-item ${insight.mode === 'ai' ? 'ai-live-insight' : ''}">
@@ -770,7 +646,7 @@ async function generateAIInsights() {
     showNotification('Generating AI SOC report...', 'info');
 
     try {
-        const response = await fetch('https://microsoc-backend.onrender.com/api/ai/generate-report', {
+        const response = await fetch(`${getApiBaseUrl()}/ai/generate-report`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -778,6 +654,7 @@ async function generateAIInsights() {
             },
             body: JSON.stringify({
                 analytics: analyticsData,
+                logs: getAnalyticsLogs(),
                 riskScore: document.getElementById('risk-score')?.textContent || '68',
                 generatedFrom: 'analytics-page'
             })
@@ -810,82 +687,30 @@ async function generateAIInsights() {
 
 // Update Analytics
 function updateAnalytics() {
-    const timePeriod = document.getElementById('time-period').value;
-    
-    // Simulate updating data based on time period
-    showNotification(`Updating analytics for ${timePeriod}...`, 'info');
-    
-    // In a real app, this would fetch new data from the server
-    setTimeout(() => {
-        // Update charts with new data
-        if (window.threatTimelineChart) {
-            // Generate new random data based on time period
-            const days = timePeriod === '24h' ? 
-                ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'] :
-                timePeriod === '7d' ? 
-                ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] :
-                ['Week 1', 'Week 2', 'Week 3', 'Week 4'];
-            
-            analyticsData.threatTimeline.labels = days;
-            analyticsData.threatTimeline.datasets.forEach(dataset => {
-                dataset.data = days.map(() => Math.floor(Math.random() * 50) + 10);
-            });
-            
-            window.threatTimelineChart.update();
-        }
-        
-        // Update patterns count
-        const newPatternCount = Math.floor(Math.random() * 5) + 3;
-        document.getElementById('patterns-detected').textContent = `${newPatternCount} patterns`;
-        
-        // Update anomalies count
-        const newAnomaliesCount = Math.floor(Math.random() * 4) + 1;
-        document.getElementById('anomalies-count').textContent = `${newAnomaliesCount} anomalies`;
-        
-        // Update risk score
-        const newRiskScore = Math.floor(Math.random() * 30) + 50;
-        document.getElementById('risk-score').textContent = newRiskScore;
-        
-        showNotification(`Analytics updated for ${timePeriod}`, 'success');
-    }, 1000);
+    loadAnalyticsData();
+    if (attackDistributionChart instanceof Chart) {
+        attackDistributionChart.data = analyticsData.attackDistribution;
+        attackDistributionChart.update();
+        createAttackDistributionLegend();
+    }
+    if (window.threatTimelineChart instanceof Chart) {
+        window.threatTimelineChart.data = analyticsData.threatTimeline;
+        window.threatTimelineChart.update();
+    }
+    loadPatterns();
+    loadTopSources();
+    loadAnomalies();
+    loadRemediations();
+    loadPredictions();
+    updateAnalyticsStats();
+    showNotification('Analytics recalculated from stored logs', 'success');
 }
 
 // Run Pattern Analysis
 function runPatternAnalysis() {
-    showNotification('Running advanced pattern analysis...', 'info');
-    
-    // Simulate analysis running
-    setTimeout(() => {
-        // Add new patterns
-        const newPattern = {
-            id: Date.now(),
-            name: 'AI-Detected Behavioral Pattern',
-            confidence: 91,
-            description: 'Machine learning algorithm detected new behavioral pattern in attack sequences',
-            type: 'Behavioral',
-            frequency: 'Pattern detected across 24 instances',
-            timeframe: 'Last 72 hours',
-            severity: 'High'
-        };
-        
-        analyticsData.patterns.unshift(newPattern);
-        loadPatterns();
-        
-        // Add new anomaly
-        const newAnomaly = {
-            id: Date.now(),
-            title: 'AI-Detected Anomalous Behavior',
-            severity: 'High',
-            description: 'Machine learning detected anomalous behavior in network traffic patterns',
-            timestamp: new Date().toISOString(),
-            confidence: 89
-        };
-        
-        analyticsData.anomalies.unshift(newAnomaly);
-        loadAnomalies();
-        
-        showNotification('Pattern analysis complete. New patterns and anomalies detected.', 'success');
-    }, 2000);
+    loadPatterns();
+    loadAnomalies();
+    showNotification('Pattern analysis recalculated from stored logs', 'success');
 }
 
 // Export Analytics
@@ -918,19 +743,31 @@ function exportAnalytics() {
 
 // Update Analytics Stats
 function updateAnalyticsStats() {
-    // In a real app, these would be calculated from actual data
+    const logs = getAnalyticsLogs();
+    const total = logs.length;
+    const blocked = logs.filter(log => log.isBlocked).length;
+    const criticalHigh = logs.filter(log => ['critical', 'high'].includes(log.severity)).length;
+    const avgSeverity = total
+        ? Math.round(logs.reduce((sum, log) => sum + severityWeight(log.severity), 0) / total)
+        : 0;
     const stats = {
-        detectionRate: (98.5 + Math.random() * 0.5).toFixed(1),
-        preventionSuccess: (93.5 + Math.random() * 1.5).toFixed(1),
-        responseTime: (1.7 + Math.random() * 0.3).toFixed(1),
-        aiConfidence: (88.5 + Math.random() * 2).toFixed(1)
+        detectionRate: total ? '100.0' : '0.0',
+        preventionSuccess: total ? ((blocked / total) * 100).toFixed(1) : '0.0',
+        responseTime: total ? `${criticalHigh}` : '0',
+        aiConfidence: total ? String(Math.min(95, 45 + avgSeverity / 2).toFixed(1)) : '0.0'
     };
     
     // Update stat cards
     document.querySelectorAll('.stat-value')[0].textContent = `${stats.detectionRate}%`;
     document.querySelectorAll('.stat-value')[1].textContent = `${stats.preventionSuccess}%`;
-    document.querySelectorAll('.stat-value')[2].textContent = `${stats.responseTime}h`;
+    document.querySelectorAll('.stat-value')[2].textContent = stats.responseTime;
     document.querySelectorAll('.stat-value')[3].textContent = `${stats.aiConfidence}%`;
+
+    const riskScore = document.getElementById('risk-score');
+    if (riskScore) {
+        const activeRisk = logs.filter(log => !log.isBlocked).reduce((sum, log) => sum + severityWeight(log.severity), 0);
+        riskScore.textContent = total ? Math.min(100, Math.round((activeRisk / Math.max(total, 1)) + criticalHigh * 4)) : 0;
+    }
 }
 
 // Export functions for global use
