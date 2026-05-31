@@ -21,12 +21,21 @@ const allowedOrigins = [
   process.env.FRONTEND_URL || 'http://localhost:3000'
 ];
 
+const isLocalDevOrigin = (origin) => {
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === 'localhost' || hostname === '127.0.0.1';
+  } catch (error) {
+    return false;
+  }
+};
+
 app.use(cors({
   origin: function (origin, callback) {
     // Allow Postman / curl (no origin)
     if (!origin) return callback(null, true);
 
-    if (allowedOrigins.includes(origin)) {
+    if (allowedOrigins.includes(origin) || isLocalDevOrigin(origin)) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
@@ -127,8 +136,8 @@ const startServer = async () => {
     console.log('🚀 MicroSOC Backend Server');
     console.log('=================================');
     console.log(`✅ Server running on port ${PORT}`);
-    console.log('🌍 Environment: development');
-    console.log(`🗄️  Database: mongodb://localhost:27017/microsoc`);
+    console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🗄️  Database: ${process.env.MONGODB_URI ? 'configured' : 'mongodb://localhost:27017/microsoc'}`);
     console.log('=================================');
   });
 };

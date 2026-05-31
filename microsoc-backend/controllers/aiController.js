@@ -1,8 +1,11 @@
 const crypto = require('crypto');
 
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
+const AI_PROVIDER = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : 'openai')).toLowerCase();
+const AI_MODEL = process.env.AI_MODEL || (AI_PROVIDER === 'gemini' ? 'gemini-2.0-flash' : 'gpt-4o-mini');
 const AI_BASE_URL = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
 
 function redactSensitive(input) {
   const sensitiveKeys = /password|passwd|pwd|token|api[_-]?key|secret/i;
@@ -155,35 +158,17 @@ function fallbackChat(message = '', context = {}) {
 
 async function callAiJson(systemPrompt, userPayload, fallbackFactory) {
   const safePayload = redactSensitive(userPayload);
+  const hasProviderKey = AI_PROVIDER === 'gemini' ? GEMINI_API_KEY : AI_API_KEY;
 
-  if (!AI_API_KEY) {
+  if (!hasProviderKey) {
     return { mode: 'fallback', data: fallbackFactory(safePayload) };
   }
 
   try {
-    const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${AI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: AI_MODEL,
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: `${systemPrompt}\nReturn only valid JSON.` },
-          { role: 'user', content: JSON.stringify(safePayload) }
-        ]
-      })
-    });
+    const content = AI_PROVIDER === 'gemini'
+      ? await callGeminiJson(systemPrompt, safePayload)
+      : await callOpenAiJson(systemPrompt, safePayload);
 
-    if (!response.ok) {
-      throw new Error(`AI provider returned ${response.status}`);
-    }
-
-    const body = await response.json();
-    const content = body.choices?.[0]?.message?.content;
     if (!content) throw new Error('AI provider returned empty content');
 
     return { mode: 'ai', data: JSON.parse(content) };
@@ -191,6 +176,71 @@ async function callAiJson(systemPrompt, userPayload, fallbackFactory) {
     console.error('AI provider fallback:', error.message);
     return { mode: 'fallback', data: fallbackFactory(safePayload) };
   }
+}
+
+async function callOpenAiJson(systemPrompt, safePayload) {
+  const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${AI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: AI_MODEL,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: `${systemPrompt}\nReturn only valid JSON.` },
+        { role: 'user', content: JSON.stringify(safePayload) }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenAI provider returned ${response.status}`);
+  }
+
+  const body = await response.json();
+  return body.choices?.[0]?.message?.content;
+}
+
+async function callGeminiJson(systemPrompt, safePayload) {
+  const model = encodeURIComponent(AI_MODEL);
+  const url = `${GEMINI_BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  const prompt = [
+    systemPrompt,
+    'Return only valid JSON. Do not wrap the JSON in Markdown.',
+    JSON.stringify(safePayload)
+  ].join('\n\n');
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: prompt }]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.2,
+        responseMimeType: 'application/json'
+      }
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Gemini provider returned ${response.status}`);
+  }
+
+  const body = await response.json();
+  return body.candidates?.[0]?.content?.parts
+    ?.map(part => part.text || '')
+    .join('')
+    .trim();
 }
 
 exports.explainLog = async (req, res) => {
