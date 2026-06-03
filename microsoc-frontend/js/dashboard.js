@@ -1,5 +1,16 @@
 // Dashboard Specific JavaScript
 
+function getApiBaseUrl() {
+    return window.MICROSOC_API_BASE_URL || 'http://localhost:5001/api';
+}
+
+function getAuthHeaders() {
+    return {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+    };
+}
+
 // Initialize Dashboard
 function initDashboard() {
     loadStats();
@@ -9,61 +20,21 @@ function initDashboard() {
 }
 
 // Load Stats Cards
-function loadStats() {
-    const stats = [
-        {
-            icon: 'fa-broadcast-tower',
-            title: 'Total Logs',
-            value: '12,478',
-            change: '+3.2%',
-            changeType: 'positive',
-            color: '#007bff'
-        },
-        {
-            icon: 'fa-exclamation-triangle',
-            title: 'Active Incidents',
-            value: '23',
-            change: '-2',
-            changeType: 'negative',
-            color: '#dc3545'
-        },
-        {
-            icon: 'fa-skull-crossbones',
-            title: 'Critical Threats',
-            value: '5',
-            change: '+1',
-            changeType: 'negative',
-            color: '#fd7e14'
-        },
-        {
-            icon: 'fa-clock',
-            title: 'Avg Response Time',
-            value: '2.4h',
-            change: '-0.5h',
-            changeType: 'positive',
-            color: '#28a745'
-        },
-        {
-            icon: 'fa-shield-alt',
-            title: 'Attacks Today',
-            value: '347',
-            change: '+12%',
-            changeType: 'negative',
-            color: '#17a2b8'
-        },
-        {
-            icon: 'fa-check-circle',
-            title: 'Prevented Attacks',
-            value: '289',
-            change: '+8%',
-            changeType: 'positive',
-            color: '#28a745'
-        }
-    ];
-    
+async function loadStats() {
     const container = document.getElementById('stats-container');
     if (!container) return;
-    
+    container.innerHTML = '<div class="empty-state">Loading dashboard stats...</div>';
+
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/dashboard/stats`, {
+            headers: getAuthHeaders()
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.message || 'Could not load dashboard stats');
+        }
+        const stats = payload.stats || [];
+
     container.innerHTML = stats.map(stat => `
         <div class="stat-card">
             <div class="stat-icon" style="background: ${stat.color}20; color: ${stat.color}">
@@ -79,50 +50,46 @@ function loadStats() {
             </div>
         </div>
     `).join('');
+    } catch (error) {
+        console.error('Dashboard stats failed:', error);
+        container.innerHTML = '<div class="empty-state">No live dashboard stats available. Check backend/session.</div>';
+    }
 }
 
 // Load Attack Trends Chart
-function loadAttackTrends() {
+async function loadAttackTrends() {
     const ctx = document.getElementById('attackTrendsChart');
     if (!ctx) return;
-    
-    const data = {
-        labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-        datasets: [
-            {
-                label: 'XSS Attacks',
-                data: [45, 32, 56, 28, 39, 25, 42],
-                borderColor: '#dc3545',
-                backgroundColor: 'rgba(220, 53, 69, 0.1)',
-                tension: 0.4
-            },
-            {
-                label: 'SQL Injection',
-                data: [28, 35, 31, 42, 26, 38, 29],
-                borderColor: '#007bff',
-                backgroundColor: 'rgba(0, 123, 255, 0.1)',
-                tension: 0.4
-            },
-            {
-                label: 'Port Scans',
-                data: [78, 65, 89, 72, 81, 68, 75],
-                borderColor: '#28a745',
-                backgroundColor: 'rgba(40, 167, 69, 0.1)',
-                tension: 0.4
-            },
-            {
-                label: 'Brute Force',
-                data: [42, 38, 51, 34, 47, 41, 39],
-                borderColor: '#ffc107',
-                backgroundColor: 'rgba(255, 193, 7, 0.1)',
-                tension: 0.4
-            }
-        ]
-    };
-    
-    new Chart(ctx, {
+
+    let data;
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/analytics/threat-timeline?timeRange=7d`, {
+            headers: getAuthHeaders()
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.message || 'Could not load threat timeline');
+        }
+        data = payload.timeline || payload.data?.timeline;
+    } catch (error) {
+        console.error('Attack trends failed:', error);
+        return;
+    }
+
+    if (window.attackTrendsChart?.destroy) {
+        window.attackTrendsChart.destroy();
+    }
+
+    const chartData = data?.labels && data?.datasets
+        ? data
+        : {
+            labels: [],
+            datasets: []
+        };
+
+    window.attackTrendsChart = new Chart(ctx, {
         type: 'line',
-        data: data,
+        data: chartData,
         options: {
             responsive: true,
             plugins: {
@@ -148,89 +115,89 @@ function loadAttackTrends() {
 }
 
 // Load Top Attackers
-function loadTopAttackers() {
-    const attackers = [
-        { ip: '192.168.1.105', country: 'USA', attacks: 245, lastSeen: new Date(Date.now() - 3600000) },
-        { ip: '10.0.0.42', country: 'China', attacks: 189, lastSeen: new Date(Date.now() - 7200000) },
-        { ip: '172.16.0.88', country: 'Russia', attacks: 156, lastSeen: new Date(Date.now() - 10800000) },
-        { ip: '203.0.113.25', country: 'Germany', attacks: 98, lastSeen: new Date(Date.now() - 14400000) },
-        { ip: '198.51.100.13', country: 'India', attacks: 134, lastSeen: new Date(Date.now() - 18000000) }
-    ];
-    
+async function loadTopAttackers() {
     const container = document.getElementById('top-attackers');
     if (!container) return;
-    
+    container.innerHTML = '<tr><td colspan="4">Loading top attackers...</td></tr>';
+
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/dashboard/realtime`, {
+            headers: getAuthHeaders()
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.message || 'Could not load top attackers');
+        }
+        const attackers = payload.realtimeData?.topAttackers || [];
+
     container.innerHTML = attackers.map(attacker => `
         <tr>
-            <td class="ip-address">${attacker.ip}</td>
+            <td class="ip-address">${attacker.ip || attacker._id}</td>
             <td>
                 <i class="fas fa-globe-americas"></i>
-                ${attacker.country}
+                ${attacker.country || 'Unknown'}
             </td>
             <td>
-                <span class="badge badge-danger">${attacker.attacks}</span>
+                <span class="badge badge-danger">${attacker.attacks || attacker.count || 0}</span>
             </td>
             <td class="timestamp">
                 ${formatDate(attacker.lastSeen)}
             </td>
         </tr>
-    `).join('');
+    `).join('') || '<tr><td colspan="4">No attacker data yet.</td></tr>';
+    } catch (error) {
+        console.error('Top attackers failed:', error);
+        container.innerHTML = '<tr><td colspan="4">No live attacker data available.</td></tr>';
+    }
 }
 
 // Start Real-time Log Stream
 function startLogStream() {
     const container = document.getElementById('realtime-logs');
     if (!container) return;
-    
-    // Initial logs
-    generateLogs(container, 10);
-    
-    // Add new log every 5 seconds
-    setInterval(() => {
-        generateLogs(container, 1);
-    }, 5001);
+
+    container.innerHTML = '';
+    fetch(`${getApiBaseUrl()}/logs?limit=10&timeRange=all`, { headers: getAuthHeaders() })
+        .then(response => response.json())
+        .then(payload => {
+            (payload.logs || []).reverse().forEach(log => appendLog(container, log));
+        })
+        .catch(error => {
+            console.error('Initial realtime logs failed:', error);
+        });
+
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${new URL(getApiBaseUrl()).host}/ws/threat-feed`;
+    const socket = new WebSocket(wsUrl);
+    socket.addEventListener('message', event => {
+        const payload = JSON.parse(event.data);
+        if (payload.log) appendLog(container, payload.log);
+    });
 }
 
-// Generate Logs
-function generateLogs(container, count) {
-    const attackTypes = ['XSS', 'SQL Injection', 'Port Scan', 'Brute Force', 'DDoS', 'Malware'];
-    const severities = ['low', 'medium', 'high', 'critical'];
-    const countries = ['USA', 'China', 'Russia', 'Germany', 'India', 'Brazil', 'Japan'];
-    
-    for (let i = 0; i < count; i++) {
-        const attackType = attackTypes[Math.floor(Math.random() * attackTypes.length)];
-        const severity = severities[Math.floor(Math.random() * severities.length)];
-        const ip = generateIP();
-        const country = countries[Math.floor(Math.random() * countries.length)];
-        
-        const logEntry = document.createElement('div');
-        logEntry.className = 'log-entry';
-        logEntry.innerHTML = `
-            <div class="log-icon" style="color: ${getSeverityColor(severity)}">
-                <i class="fas ${getAttackTypeIcon(attackType)}"></i>
+function appendLog(container, log) {
+    const severity = log.severity || 'medium';
+    const logEntry = document.createElement('div');
+    logEntry.className = 'log-entry';
+    logEntry.innerHTML = `
+        <div class="log-icon" style="color: ${getSeverityColor(severity)}">
+            <i class="fas ${getAttackTypeIcon(log.attackType || 'Other')}"></i>
+        </div>
+        <div class="log-content">
+            <strong>${log.attackType || 'Threat'}</strong> attack detected
+            <div class="log-meta">
+                <span class="log-ip">${log.sourceIP || 'Unknown'}</span>
+                <span class="log-severity badge" style="background: ${getSeverityColor(severity)}">${severity.toUpperCase()}</span>
+                <span class="log-country">${log.country || 'Unknown'}</span>
+                <span class="log-time">${new Date(log.timestamp || Date.now()).toLocaleTimeString()}</span>
             </div>
-            <div class="log-content">
-                <strong>${attackType}</strong> attack detected
-                <div class="log-meta">
-                    <span class="log-ip">${ip}</span>
-                    <span class="log-severity badge" style="background: ${getSeverityColor(severity)}">${severity.toUpperCase()}</span>
-                    <span class="log-country">${country}</span>
-                    <span class="log-time">${new Date().toLocaleTimeString()}</span>
-                </div>
-            </div>
-        `;
-        
-        container.insertBefore(logEntry, container.firstChild);
-        
-        // Limit to 20 logs
-        if (container.children.length > 20) {
-            container.removeChild(container.lastChild);
-        }
-        
-        // Update incident count if critical
-        if (severity === 'critical') {
-            updateIncidentCount();
-        }
+        </div>
+    `;
+
+    container.insertBefore(logEntry, container.firstChild);
+
+    if (container.children.length > 20) {
+        container.removeChild(container.lastChild);
     }
 }
 

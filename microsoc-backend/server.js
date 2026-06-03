@@ -3,12 +3,16 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const http = require('http');
 require('dotenv').config();
+const realtimeHub = require('./utils/realtimeHub');
 
 // =====================
 // Create app
 // =====================
 const app = express();
+const server = http.createServer(app);
+app.set('etag', false);
 
 // =====================
 // CORS (🔥 MUST BE FIRST)
@@ -56,6 +60,10 @@ app.use(helmet());
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 
 // =====================
 // Database Connection
@@ -81,19 +89,12 @@ const connectDB = async () => {
 // Routes
 // =====================
 app.use('/api/auth', require('./routes/auth'));
-app.use('/api/incidents', require('./routes/incidentRoutes'));
+app.use('/api/logs', require('./routes/logs'));
+app.use('/api/dashboard', require('./routes/dashboard'));
+app.use('/api/incidents', require('./routes/incidents'));
 app.use('/api/ai', require('./routes/ai'));
-
-// Temporary analytics API
-app.get('/api/analytics', (req, res) => {
-  console.log('🔥 Analytics API HIT');
-  res.json({
-    attackDistribution: [12, 8, 5, 6],
-    timeline: Array.from({ length: 10 }, () =>
-      Math.floor(Math.random() * 20)
-    )
-  });
-});
+app.use('/api/analytics', require('./routes/analytics'));
+app.use('/api/threat-intel', require('./routes/threatIntel'));
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -102,6 +103,14 @@ app.get('/api/health', (req, res) => {
     message: 'MicroSOC Backend is running',
     database:
       mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+  });
+});
+
+app.get('/api/realtime/status', (req, res) => {
+  res.json({
+    success: true,
+    websocketUrl: `ws://localhost:${process.env.PORT || 5001}/ws/threat-feed`,
+    sseUrl: `/api/logs/stream`
   });
 });
 
@@ -131,7 +140,24 @@ const startServer = async () => {
   await connectDB();
 
   const PORT = process.env.PORT || 5001;
-  app.listen(PORT, () => {
+  server.on('upgrade', (req, socket) => {
+    if (req.url.startsWith('/ws/threat-feed')) {
+      realtimeHub.handleUpgrade(req, socket);
+      return;
+    }
+    socket.destroy();
+  });
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} is already in use. Stop the old backend process or run with PORT=${Number(PORT) + 1}.`);
+      process.exit(1);
+    }
+    console.error('❌ Server listen error:', error);
+    process.exit(1);
+  });
+
+  server.listen(PORT, () => {
     console.log('=================================');
     console.log('🚀 MicroSOC Backend Server');
     console.log('=================================');

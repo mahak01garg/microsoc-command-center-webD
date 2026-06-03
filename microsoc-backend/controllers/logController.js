@@ -1,5 +1,6 @@
 const Log = require('../models/Log');
 const User = require('../models/User');
+const realtimeHub = require('../utils/realtimeHub');
 
 // @desc    Get all logs with filters
 // @route   GET /api/logs
@@ -168,6 +169,7 @@ exports.createLog = async (req, res) => {
     }
 
     const log = await Log.create(logData);
+    realtimeHub.broadcast({ type: 'new-log', log });
 
     res.status(201).json({
       success: true,
@@ -267,6 +269,7 @@ exports.createBulkLogs = async (req, res) => {
     }));
 
     const logs = await Log.insertMany(logsWithUser);
+    logs.forEach(log => realtimeHub.broadcast({ type: 'new-log', log }));
 
     res.status(201).json({
       success: true,
@@ -334,6 +337,7 @@ exports.generateMockLogs = async (req, res) => {
     }
 
     const createdLogs = await Log.insertMany(logs);
+    createdLogs.forEach(log => realtimeHub.broadcast({ type: 'new-log', log }));
 
     res.status(201).json({
       success: true,
@@ -452,11 +456,7 @@ exports.streamLogs = async (req, res) => {
 
     // Mock real-time updates every 5 seconds
     const interval = setInterval(async () => {
-      const mockLog = Log.generateMockLog();
-      mockLog.processedBy = req.user.id;
-      mockLog.processedAt = new Date();
-      
-      const log = await Log.create(mockLog);
+      const log = await realtimeHub.createDemoLog(req.user.id);
       
       res.write(`data: ${JSON.stringify({ type: 'new', log })}\n\n`);
     }, 5001);

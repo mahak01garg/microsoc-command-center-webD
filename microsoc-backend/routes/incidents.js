@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+const { protect } = require('../middleware/auth');
 const incidentController = require('../controllers/incidentController');
 
 // All routes require authentication
-router.use(auth);
+router.use(protect);
 
 // @route   GET /api/incidents
 // @desc    Get all incidents

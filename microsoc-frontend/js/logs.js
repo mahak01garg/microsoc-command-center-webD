@@ -597,7 +597,7 @@ function closeLogModal() {
 
 // Show Remediation Suggestions
 async function showRemediation(logId) {
-    const log = allLogs.find(l => l.id === logId) || allLogs.find(l => l.attackType === logId);
+    const log = allLogs.find(l => String(l.id) === String(logId)) || allLogs.find(l => String(l._id) === String(logId));
     if (!log) return;
 
     const content = document.getElementById('remediation-content');
@@ -622,6 +622,9 @@ async function showRemediation(logId) {
         }
 
         const result = payload.data || {};
+        if (payload.mode !== 'ai') {
+            throw new Error('AI provider did not generate this response');
+        }
         const actions = result.recommendedActions || [];
         const containment = result.containment || [];
         const evidence = result.evidenceNeeded || [];
@@ -641,10 +644,14 @@ async function showRemediation(logId) {
     } catch (error) {
         console.error('AI remediation failed:', error);
         content.innerHTML = `
-            <h4>AI prevention unavailable</h4>
-            <p>Could not generate prevention guidance right now. Please check backend login/session.</p>
+            <h4>AI service unavailable</h4>
+            <p>MicroSOC did not use local guidance. The AI provider failed to generate a response.</p>
+            <p class="text-warning"><i class="fas fa-info-circle"></i> ${escapeHtml(error.message || 'Check backend AI provider configuration.')}</p>
             <div class="mt-20">
-                <button class="btn btn-primary" onclick="closeRemediationModal()">Close</button>
+                <button class="btn btn-primary" onclick="showRemediation('${escapeHtml(log.id || log._id)}')">
+                    <i class="fas fa-sync"></i> Retry AI
+                </button>
+                <button class="btn btn-outline" onclick="closeRemediationModal()">Close</button>
             </div>
         `;
     }

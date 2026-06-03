@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+const { protect } = require('../middleware/auth');
 const analyticsController = require('../controllers/analyticsController');
 
 // All routes require authentication
-router.use(auth);
+router.use(protect);
 
 // @route   GET /api/analytics/overview
 // @desc    Get analytics overview

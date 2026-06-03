@@ -1,4 +1,6 @@
 const crypto = require('crypto');
+const Log = require('../models/Log');
+const Incident = require('../models/Incident');
 
 const AI_PROVIDER = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : 'openai')).toLowerCase();
 const AI_MODEL = process.env.AI_MODEL || (AI_PROVIDER === 'gemini' ? 'gemini-2.0-flash' : 'gpt-4o-mini');
@@ -6,6 +8,7 @@ const AI_BASE_URL = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').rep
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
+const AI_REQUIRE_PROVIDER = String(process.env.AI_REQUIRE_PROVIDER || 'true').toLowerCase() !== 'false';
 
 function redactSensitive(input) {
   const sensitiveKeys = /password|passwd|pwd|token|api[_-]?key|secret/i;
@@ -144,6 +147,25 @@ function fallbackReport(payload = {}) {
 
 function fallbackChat(message = '', context = {}) {
   const normalized = String(message).toLowerCase();
+  const recentAlerts = context.recentAlerts || [];
+  const openIncidents = context.openIncidents || [];
+  if (normalized.includes('summarize') && (normalized.includes('alert') || normalized.includes('log'))) {
+    const criticalHigh = recentAlerts.filter(alert => ['critical', 'high'].includes(alert.severity)).length;
+    const topTypes = [...new Set(recentAlerts.map(alert => alert.attackType).filter(Boolean))].slice(0, 4);
+    return `Last ${recentAlerts.length} alerts include ${criticalHigh} critical/high events. Main attack families: ${topTypes.join(', ') || 'not enough data'}. Prioritize unblocked critical/high alerts and repeated source IPs.`;
+  }
+  if (normalized.includes('explain') && normalized.includes('attack')) {
+    const latest = recentAlerts[0] || {};
+    return `${latest.attackType || 'This attack'} appears to target ${latest.targetSystem || 'an exposed system'} from ${latest.sourceIP || 'an unknown source'}. Severity is ${latest.severity || 'medium'}; verify impact, collect raw payloads, and contain repeated sources.`;
+  }
+  if (normalized.includes('mitigation') || normalized.includes('mitigate') || normalized.includes('steps')) {
+    const latest = recentAlerts[0] || {};
+    return `Suggested mitigation: block or challenge ${latest.sourceIP || 'the noisy source'}, confirm whether ${latest.targetSystem || 'the target'} was affected, tune WAF/IDS rules for ${latest.attackType || 'the attack family'}, and document containment in the incident timeline.`;
+  }
+  if (normalized.includes('severity')) {
+    const unresolvedCritical = openIncidents.filter(incident => incident.severity === 'critical').length;
+    return `Severity should be driven by exploitability, affected asset criticality, blocked/unblocked status, and repeated activity. Current context shows ${unresolvedCritical} open critical incident(s).`;
+  }
   if (normalized.includes('priority') || normalized.includes('first')) {
     return 'Start with critical/high unblocked events, then incidents with many related logs, then repeated sources. Convert anything with confirmed impact into an incident and document containment.';
   }
@@ -161,6 +183,9 @@ async function callAiJson(systemPrompt, userPayload, fallbackFactory) {
   const hasProviderKey = AI_PROVIDER === 'gemini' ? GEMINI_API_KEY : AI_API_KEY;
 
   if (!hasProviderKey) {
+    if (AI_REQUIRE_PROVIDER) {
+      throw new Error(`${AI_PROVIDER} API key is not configured`);
+    }
     return { mode: 'fallback', data: fallbackFactory(safePayload) };
   }
 
@@ -171,10 +196,24 @@ async function callAiJson(systemPrompt, userPayload, fallbackFactory) {
 
     if (!content) throw new Error('AI provider returned empty content');
 
-    return { mode: 'ai', data: JSON.parse(content) };
+    return { mode: 'ai', data: parseAiJson(content) };
   } catch (error) {
-    console.error('AI provider fallback:', error.message);
+    console.error('AI provider failed:', error.message);
+    if (AI_REQUIRE_PROVIDER) {
+      throw error;
+    }
     return { mode: 'fallback', data: fallbackFactory(safePayload) };
+  }
+}
+
+function parseAiJson(content) {
+  const text = String(content || '').trim();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) throw error;
+    return JSON.parse(match[0]);
   }
 }
 
@@ -183,7 +222,11 @@ async function callOpenAiJson(systemPrompt, safePayload) {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${AI_API_KEY}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...(AI_BASE_URL.includes('openrouter.ai') ? {
+        'HTTP-Referer': process.env.FRONTEND_URL || 'http://localhost:5173',
+        'X-Title': 'MicroSOC Command Center'
+      } : {})
     },
     body: JSON.stringify({
       model: AI_MODEL,
@@ -197,11 +240,16 @@ async function callOpenAiJson(systemPrompt, safePayload) {
   });
 
   if (!response.ok) {
-    throw new Error(`OpenAI provider returned ${response.status}`);
+    const errorBody = await response.text().catch(() => '');
+    throw new Error(`AI provider returned ${response.status}: ${errorBody.slice(0, 240)}`);
   }
 
   const body = await response.json();
-  return body.choices?.[0]?.message?.content;
+  const content = body.choices?.[0]?.message?.content;
+  if (Array.isArray(content)) {
+    return content.map(part => part.text || part.content || '').join('');
+  }
+  return content;
 }
 
 async function callGeminiJson(systemPrompt, safePayload) {
@@ -244,51 +292,103 @@ async function callGeminiJson(systemPrompt, safePayload) {
 }
 
 exports.explainLog = async (req, res) => {
-  const result = await callAiJson(
-    'You are a senior SOC analyst. Explain a security log with concise risk, likely intent, MITRE mapping, containment, and evidence needed.',
-    req.body.log || req.body,
-    fallbackLogExplanation
-  );
+  try {
+    const result = await callAiJson(
+      'You are a senior SOC analyst. Explain a security log with concise risk, likely intent, MITRE mapping, containment, and evidence needed.',
+      req.body.log || req.body,
+      fallbackLogExplanation
+    );
 
-  res.json({ success: true, ...result });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      mode: 'ai_error',
+      message: 'AI provider is unavailable or rejected the request',
+      detail: error.message
+    });
+  }
 };
 
 exports.triageIncident = async (req, res) => {
-  const result = await callAiJson(
-    'You are a senior incident commander. Triage this incident with severity, priorityScore, summary, businessImpact, recommendedActions, containment, mitre, and evidenceNeeded.',
-    req.body.incident || req.body,
-    fallbackIncidentTriage
-  );
+  try {
+    const result = await callAiJson(
+      'You are a senior incident commander. Triage this incident with severity, priorityScore, summary, businessImpact, recommendedActions, containment, mitre, and evidenceNeeded.',
+      req.body.incident || req.body,
+      fallbackIncidentTriage
+    );
 
-  res.json({ success: true, ...result });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      mode: 'ai_error',
+      message: 'AI provider is unavailable or rejected the request',
+      detail: error.message
+    });
+  }
 };
 
 exports.generateReport = async (req, res) => {
-  const result = await callAiJson(
-    'You are a SOC reporting assistant. Generate an executive-ready JSON report with title, riskScore, confidence, summary, keyFindings, recommendedActions, and watchlist.',
-    req.body,
-    fallbackReport
-  );
+  try {
+    const result = await callAiJson(
+      'You are a SOC reporting assistant. Generate an executive-ready JSON report with title, riskScore, confidence, summary, keyFindings, recommendedActions, and watchlist.',
+      req.body,
+      fallbackReport
+    );
 
-  res.json({ success: true, ...result });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      mode: 'ai_error',
+      message: 'AI provider is unavailable or rejected the request',
+      detail: error.message
+    });
+  }
 };
 
 exports.chat = async (req, res) => {
+  const recentAlerts = await Log.find()
+    .sort({ timestamp: -1 })
+    .limit(20)
+    .select('timestamp attackType sourceIP targetSystem severity isBlocked country description')
+    .lean()
+    .catch(() => []);
+  const openIncidents = await Incident.find({ status: { $in: ['open', 'in_progress'] } })
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .select('title severity status sourceIP priority')
+    .lean()
+    .catch(() => []);
   const payload = {
     message: req.body.message || '',
-    context: req.body.context || {}
+    context: {
+      ...(req.body.context || {}),
+      recentAlerts,
+      openIncidents
+    }
   };
 
-  const result = await callAiJson(
-    'You are MicroSOC AI Assistant. Answer practical SOC questions briefly with clear next actions. Use JSON with answer and nextActions.',
-    payload,
-    safePayload => ({
-      answer: fallbackChat(safePayload.message, safePayload.context),
-      nextActions: ['Review high severity queue', 'Correlate logs around the event time', 'Document containment actions']
-    })
-  );
+  try {
+    const result = await callAiJson(
+      'You are MicroSOC AI Security Analyst. Answer practical SOC questions with clear next actions. You can explain attacks, summarize recent alerts, suggest mitigations, assess severity, and reference MITRE-style techniques. Use JSON with answer and nextActions.',
+      payload,
+      safePayload => ({
+        answer: fallbackChat(safePayload.message, safePayload.context),
+        nextActions: ['Review high severity queue', 'Correlate logs around the event time', 'Document containment actions']
+      })
+    );
 
-  res.json({ success: true, ...result });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      mode: 'ai_error',
+      message: 'AI provider is unavailable or rejected the request',
+      detail: error.message
+    });
+  }
 };
 
 exports.naturalSearch = async (req, res) => {

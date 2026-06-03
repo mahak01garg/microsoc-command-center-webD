@@ -2,82 +2,39 @@
 
 let incidents = [];
 
-function getDemoIncidents() {
-    return [
-        {
-            id: 101,
-            title: 'Critical SQL Injection Attempt',
-            description: 'Repeated SQL payloads detected against the auth gateway.',
-            severity: 'critical',
-            status: 'open',
-            assignedTo: 'Mahak Garg',
-            createdAt: new Date(Date.now() - 22 * 60000).toISOString(),
-            logs: 14,
-            sourceIP: '203.0.113.42'
-        },
-        {
-            id: 102,
-            title: 'Brute Force Login Pattern',
-            description: 'High-volume failed login attempts from rotating source IPs.',
-            severity: 'high',
-            status: 'in_progress',
-            assignedTo: 'Honey Tiwari',
-            createdAt: new Date(Date.now() - 2 * 3600000).toISOString(),
-            logs: 37,
-            sourceIP: '198.51.100.18'
-        },
-        {
-            id: 103,
-            title: 'Suspicious Port Scan',
-            description: 'Reconnaissance activity detected across production subnets.',
-            severity: 'medium',
-            status: 'resolved',
-            assignedTo: 'Green Ranger',
-            createdAt: new Date(Date.now() - 8 * 3600000).toISOString(),
-            logs: 9,
-            sourceIP: '192.0.2.91'
-        }
-    ];
+function getApiBaseUrl() {
+    return window.MICROSOC_API_BASE_URL || 'http://localhost:5001/api';
+}
+
+function getAuthHeaders() {
+    return {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+    };
 }
 
 // Load Incidents
 async function loadIncidents() {
-    const localIncidents = getLocalIncidents();
-
     try {
-        const token = localStorage.getItem("token");
-
-        const res = await fetch("https://microsoc-backend.onrender.com/api/incidents", {
-            headers: {
-                "Authorization": `Bearer ${token}`
-            }
+        const res = await fetch(`${getApiBaseUrl()}/incidents?limit=50`, {
+            headers: getAuthHeaders()
         });
 
         const data = await res.json();
 
         if (!res.ok) {
-            console.error(data.message);
-            incidents = localIncidents.length ? localIncidents : getDemoIncidents();
-            renderInciments(incidents);
-            return;
+            throw new Error(data.message || 'Failed to load incidents');
         }
 
         const backendIncidents = Array.isArray(data.incidents) ? data.incidents.map(normalizeIncident) : [];
-        incidents = [...localIncidents, ...backendIncidents];
-        if (!incidents.length) incidents = getDemoIncidents();
+        incidents = backendIncidents;
         renderInciments(incidents);
+        renderIncidentStats(data.stats);
     } catch (err) {
         console.error("Failed to load incidents", err);
-        incidents = localIncidents.length ? localIncidents : getDemoIncidents();
-        renderInciments(incidents);
-    }
-}
-
-function getLocalIncidents() {
-    try {
-        return JSON.parse(localStorage.getItem('microsocLocalIncidents') || '[]').map(normalizeIncident);
-    } catch (error) {
-        return [];
+        incidents = [];
+        renderIncidentError(err.message || 'No live incident data available.');
+        renderIncidentStats();
     }
 }
 
@@ -100,11 +57,60 @@ function normalizeIncident(incident) {
     };
 }
 
+function renderIncidentError(message) {
+    const tbody = document.querySelector('#incidents-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = `<tr><td colspan="7">${escapeHtml(message)}</td></tr>`;
+}
+
+function renderIncidentStats(stats) {
+    const grid = document.querySelector('.main-content .stats-grid');
+    if (!grid) return;
+
+    const statusCounts = Object.fromEntries((stats?.statusCounts || []).map(item => [item._id, item.count]));
+    const severityCounts = Object.fromEntries((stats?.severityCounts || []).map(item => [item._id, item.count]));
+    const open = statusCounts.open || 0;
+    const inProgress = statusCounts.in_progress || 0;
+    const resolved = statusCounts.resolved || 0;
+    const critical = severityCounts.critical || 0;
+
+    const cards = [
+        { icon: 'fa-exclamation-circle', title: 'Open Incidents', value: open, color: '#dc3545' },
+        { icon: 'fa-skull-crossbones', title: 'Critical', value: critical, color: '#fd7e14' },
+        { icon: 'fa-user-clock', title: 'In Progress', value: inProgress, color: '#007bff' },
+        { icon: 'fa-check-circle', title: 'Resolved', value: resolved, color: '#28a745' }
+    ];
+
+    grid.innerHTML = cards.map(card => `
+        <div class="stat-card">
+            <div class="stat-icon" style="background: ${card.color}20; color: ${card.color}">
+                <i class="fas ${card.icon}"></i>
+            </div>
+            <div class="stat-info">
+                <h3>${card.title}</h3>
+                <div class="stat-value">${card.value}</div>
+                <div class="stat-change positive">
+                    <i class="fas fa-database"></i> Live
+                </div>
+            </div>
+        </div>
+    `).join('');
+
+    document.querySelectorAll('.sidebar-nav .badge-danger').forEach(badge => {
+        badge.textContent = open + inProgress;
+    });
+}
+
 
 // Render Incidents Table
 function renderInciments(filteredIncidents = incidents) {
     const tbody = document.querySelector('#incidents-table tbody');
     if (!tbody) return;
+
+    if (!filteredIncidents.length) {
+        tbody.innerHTML = '<tr><td colspan="7">No incidents found.</td></tr>';
+        return;
+    }
     
     tbody.innerHTML = filteredIncidents.map(incident => `
         <tr data-id="${incident.id}">
@@ -126,13 +132,13 @@ function renderInciments(filteredIncidents = incidents) {
             <td>${incident.assignedTo || 'Unassigned'}</td>
             <td>${formatDate(incident.createdAt)}</td>
             <td>
-                <button class="btn btn-sm btn-outline" onclick="viewIncident(${incident.id})">
+                <button class="btn btn-sm btn-outline" onclick="viewIncident('${incident.id}')">
                     <i class="fas fa-eye"></i>
                 </button>
-                <button class="btn btn-sm btn-outline ai-action-btn" onclick="triageIncidentWithAI(${incident.id})" title="AI Triage">
+                <button class="btn btn-sm btn-outline ai-action-btn" onclick="triageIncidentWithAI('${incident.id}')" title="AI Triage">
                     <i class="fas fa-brain"></i>
                 </button>
-                <button class="btn btn-sm btn-outline" onclick="editIncident(${incident.id})">
+                <button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')">
                     <i class="fas fa-edit"></i>
                 </button>
             </td>
@@ -180,6 +186,18 @@ function searchIncidents() {
 function openNewIncidentModal() {
     const modal = document.getElementById('new-incident-modal');
     if (!modal) return;
+    const assigneeSelect = document.getElementById('incident-assignee');
+    if (assigneeSelect) {
+        const user = JSON.parse(localStorage.getItem('user') || '{}');
+        const userId = user.id || user._id;
+        assigneeSelect.innerHTML = '<option value="">Unassigned</option>';
+        if (userId) {
+            const option = document.createElement('option');
+            option.value = userId;
+            option.textContent = user.name || user.email || 'Me';
+            assigneeSelect.appendChild(option);
+        }
+    }
     modal.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
     setTimeout(() => document.getElementById('incident-title')?.focus(), 50);
@@ -195,7 +213,7 @@ function closeModal() {
 }
 
 // Create New Incident
-function createNewIncident() {
+async function createNewIncident() {
     const title = document.getElementById('incident-title').value;
     const description = document.getElementById('incident-description').value;
     const severity = document.getElementById('incident-severity').value;
@@ -205,34 +223,38 @@ function createNewIncident() {
         alert('Please enter a title and description.');
         return;
     }
-    
-    const newIncident = {
-        id: `local-${Date.now()}`,
-        title: title,
-        description: description,
-        severity: severity,
-        status: 'open',
-        assignedTo: assignee || null,
-        createdAt: new Date().toISOString(),
-        logs: 0,
-        sourceIP: 'N/A'
-    };
-    
-    const localIncidents = getLocalIncidents();
-    localIncidents.unshift(newIncident);
-    localStorage.setItem('microsocLocalIncidents', JSON.stringify(localIncidents.slice(0, 50)));
 
-    incidents.unshift(newIncident);
-    renderInciments();
-    closeModal();
-    
-    // Show success message
-    alert('Incident created successfully!');
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/incidents`, {
+            method: 'POST',
+            headers: getAuthHeaders(),
+            body: JSON.stringify({
+                title,
+                description,
+                severity,
+                status: 'open',
+                assignedTo: /^[a-f\d]{24}$/i.test(assignee) ? assignee : undefined,
+                category: 'other',
+                priority: severity,
+                impact: severity
+            })
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.message || payload.error || 'Incident creation failed');
+        }
+        closeModal();
+        await loadIncidents();
+        alert('Incident created successfully!');
+    } catch (error) {
+        console.error('Create incident failed:', error);
+        alert(error.message || 'Incident creation failed');
+    }
 }
 
 // View Incident Details
 function viewIncident(id) {
-    const incident = incidents.find(i => i.id === id);
+    const incident = incidents.find(i => String(i.id) === String(id));
     if (!incident) return;
     
     const details = `
@@ -252,15 +274,28 @@ function viewIncident(id) {
 }
 
 // Edit Incident
-function editIncident(id) {
-    const incident = incidents.find(i => i.id === id);
+async function editIncident(id) {
+    const incident = incidents.find(i => String(i.id) === String(id));
     if (!incident) return;
     
     const newStatus = prompt('Enter new status (open/in_progress/resolved/closed):', incident.status);
     if (newStatus && ['open', 'in_progress', 'resolved', 'closed'].includes(newStatus)) {
-        incident.status = newStatus;
-        renderInciments();
-        alert('Incident status updated!');
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/incidents/${id}/status`, {
+                method: 'PUT',
+                headers: getAuthHeaders(),
+                body: JSON.stringify({ status: newStatus, note: `Status changed to ${newStatus}` })
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.success) {
+                throw new Error(payload.message || 'Status update failed');
+            }
+            await loadIncidents();
+            alert('Incident status updated!');
+        } catch (error) {
+            console.error('Incident status update failed:', error);
+            alert(error.message || 'Incident status update failed');
+        }
     }
 }
 
@@ -326,16 +361,13 @@ function closeAITriageModal() {
 }
 
 async function triageIncidentWithAI(id) {
-    const incident = incidents.find(i => i.id === id);
+    const incident = incidents.find(i => String(i.id) === String(id));
     if (!incident) return;
 
     try {
-        const response = await fetch('https://microsoc-backend.onrender.com/api/ai/triage-incident', {
+        const response = await fetch(`${getApiBaseUrl()}/ai/triage-incident`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
-            },
+            headers: getAuthHeaders(),
             body: JSON.stringify({ incident })
         });
         const payload = await response.json();

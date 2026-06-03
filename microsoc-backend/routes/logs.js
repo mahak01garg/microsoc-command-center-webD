@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+const { protect } = require('../middleware/auth');
 const logController = require('../controllers/logController');
 
 // All routes require authentication
-router.use(auth);
+router.use(protect);
 
 // @route   GET /api/logs
 // @desc    Get all logs with filters
@@ -19,7 +19,12 @@ router.get('/stats', logController.getLogStats);
 // @route   GET /api/logs/:id
 // @desc    Get single log by ID
 // @access  Private
-router.get('/:id', logController.getLogById);
+router.get('/export', logController.exportLogs);
+
+// @route   GET /api/logs/stream
+// @desc    Stream real-time logs
+// @access  Private
+router.get('/stream', logController.streamLogs);
 
 // @route   POST /api/logs
 // @desc    Create new log
@@ -54,11 +59,6 @@ router.post('/generate-mock', logController.generateMockLogs);
 // @route   GET /api/logs/export
 // @desc    Export logs
 // @access  Private
-router.get('/export', logController.exportLogs);
-
-// @route   GET /api/logs/stream
-// @desc    Stream real-time logs
-// @access  Private
-router.get('/stream', logController.streamLogs);
+router.get('/:id', logController.getLogById);
 
 module.exports = router;
