@@ -71,8 +71,24 @@ exports.getDashboardStats = async (req, res) => {
     const logsChange = totalLogs7d > 0
       ? Math.round(((totalLogs24h - (totalLogs7d / 7)) / (totalLogs7d / 7)) * 100)
       : 0;
+const securityScore = Math.max(
+  0,
+  100 -
+  (activeIncidents * 2) -
+  (criticalIncidents * 5) +
+  Math.floor(blockedPercentage / 5)
+);
+
 
     const stats = [
+      {
+        icon: 'fa-shield-virus',
+        title: 'Security Score',
+        value: `${securityScore}/100`,
+        change: securityScore >= 80 ? '+Good' : '-Needs Attention',
+        changeType: securityScore >= 80 ? 'positive' : 'negative',
+        color: '#20c997'  
+      },
       {
         icon: 'fa-broadcast-tower',
         title: 'Total Logs (24h)',

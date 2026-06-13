@@ -134,16 +134,37 @@ const IncidentSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
-  metrics: {
-    timeToDetect: Number, // in minutes
-    timeToRespond: Number, // in minutes
-    timeToResolve: Number, // in minutes
-    costImpact: Number, // in currency
+   metrics: {
+    timeToDetect: Number,
+    timeToRespond: Number,
+    timeToResolve: Number,
+    costImpact: Number,
     businessImpact: String
+  },
+
+  threatIntel: {
+    riskScore: {
+      type: Number,
+      default: 0
+    },
+    confidence: {
+      type: Number,
+      default: 0
+    },
+    mitreTechnique: {
+      type: String,
+      default: 'Unknown'
+    },
+    recommendedAction: {
+      type: String,
+      default: 'Investigate'
+    }
   }
-}, {
+},
+{
   timestamps: true
-});
+}
+);
 
 // Indexes
 IncidentSchema.index({ status: 1 });
