@@ -3,14 +3,16 @@ const Log = require('../models/Log');
 const Incident = require('../models/Incident');
 
 const AI_PROVIDER = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : 'openai')).toLowerCase();
-const AI_MODEL = process.env.AI_MODEL || (AI_PROVIDER === 'gemini' ? 'gemini-2.0-flash' : 'gpt-4o-mini');
 const AI_BASE_URL = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+const IS_OPENROUTER = AI_BASE_URL.includes('openrouter.ai');
+const AI_MODEL = process.env.AI_MODEL || (AI_PROVIDER === 'gemini' ? 'gemini-2.0-flash' : 'gpt-4o-mini');
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
 const AI_REQUIRE_PROVIDER = true;
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 15000);
 const AI_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 450);
+const AI_FORCE_RESPONSE_FORMAT = String(process.env.AI_FORCE_RESPONSE_FORMAT || (!IS_OPENROUTER)).toLowerCase() === 'true';
 
 function redactSensitive(input) {
   const sensitiveKeys = /password|passwd|pwd|token|api[_-]?key|secret/i;
@@ -213,7 +215,11 @@ async function callAiJson(systemPrompt, userPayload) {
 }
 
 function parseAiJson(content) {
-  const text = String(content || '').trim();
+  const text = String(content || '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
   try {
     return JSON.parse(text);
   } catch (error) {
@@ -281,26 +287,31 @@ function normalizeChatData(data = {}, fallbackData = {}) {
 }
 
 async function callOpenAiJson(systemPrompt, safePayload) {
+  const requestBody = {
+    model: AI_MODEL,
+    temperature: 0.2,
+    max_tokens: AI_MAX_OUTPUT_TOKENS,
+    messages: [
+      { role: 'system', content: `${systemPrompt}\nReturn only valid JSON. Do not wrap the JSON in Markdown.` },
+      { role: 'user', content: JSON.stringify(safePayload) }
+    ]
+  };
+
+  if (AI_FORCE_RESPONSE_FORMAT) {
+    requestBody.response_format = { type: 'json_object' };
+  }
+
   const response = await fetchWithTimeout(`${AI_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${AI_API_KEY}`,
       'Content-Type': 'application/json',
-      ...(AI_BASE_URL.includes('openrouter.ai') ? {
+      ...(IS_OPENROUTER ? {
         'HTTP-Referer': process.env.FRONTEND_URL || 'http://localhost:5173',
         'X-Title': 'MicroSOC Command Center'
       } : {})
     },
-    body: JSON.stringify({
-      model: AI_MODEL,
-      temperature: 0.2,
-      max_tokens: AI_MAX_OUTPUT_TOKENS,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: `${systemPrompt}\nReturn only valid JSON.` },
-        { role: 'user', content: JSON.stringify(safePayload) }
-      ]
-    })
+    body: JSON.stringify(requestBody)
   });
 
   if (!response.ok) {
