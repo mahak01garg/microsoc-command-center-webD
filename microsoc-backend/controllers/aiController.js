@@ -8,12 +8,9 @@ const AI_BASE_URL = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').rep
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
-const AI_REQUIRE_PROVIDER = String(process.env.AI_REQUIRE_PROVIDER || 'false').toLowerCase() === 'true';
+const AI_REQUIRE_PROVIDER = true;
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 15000);
 const AI_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 450);
-
-const MICROSOC_IDENTITY_ANSWER = 'I am MicroSOC AI, the SOC assistant built into MicroSOC Command Center. I help analysts triage alerts, explain security logs, summarize incidents, suggest containment steps, and prepare investigation next actions.';
-const MICROSOC_IDENTITY_ACTIONS = ['Ask me to summarize recent alerts', 'Ask for mitigation steps for a specific attack', 'Ask what to prioritize next'];
 
 function redactSensitive(input) {
   const sensitiveKeys = /password|passwd|pwd|token|api[_-]?key|secret/i;
@@ -183,11 +180,6 @@ function fallbackChat(message = '', context = {}) {
   return `I reviewed the available MicroSOC context (${Object.keys(context || {}).join(', ') || 'no extra context'}). Recommended next step: triage open critical/high incidents, inspect related logs, and apply temporary containment before permanent remediation.`;
 }
 
-function isIdentityQuestion(message = '') {
-  return /\b(who\s+are\s+you|what\s+are\s+you|your\s+name|introduce\s+yourself|tum\s+kaun|kaun\s+ho|apna\s+intro)\b/i
-    .test(String(message));
-}
-
 async function fetchWithTimeout(url, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
@@ -198,15 +190,12 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
-async function callAiJson(systemPrompt, userPayload, fallbackFactory) {
+async function callAiJson(systemPrompt, userPayload) {
   const safePayload = redactSensitive(userPayload);
   const hasProviderKey = AI_PROVIDER === 'gemini' ? GEMINI_API_KEY : AI_API_KEY;
 
   if (!hasProviderKey) {
-    if (AI_REQUIRE_PROVIDER) {
-      throw new Error(`${AI_PROVIDER} API key is not configured`);
-    }
-    return { mode: 'fallback', data: fallbackFactory(safePayload) };
+    throw new Error(`${AI_PROVIDER} API key is not configured`);
   }
 
   try {
@@ -219,10 +208,7 @@ async function callAiJson(systemPrompt, userPayload, fallbackFactory) {
     return { mode: 'ai', data: parseAiJson(content) };
   } catch (error) {
     console.error('AI provider failed:', error.message);
-    if (AI_REQUIRE_PROVIDER) {
-      throw error;
-    }
-    return { mode: 'fallback', data: fallbackFactory(safePayload) };
+    throw error;
   }
 }
 
@@ -360,7 +346,8 @@ async function callGeminiJson(systemPrompt, safePayload) {
   });
 
   if (!response.ok) {
-    throw new Error(`Gemini provider returned ${response.status}`);
+    const errorBody = await response.text().catch(() => '');
+    throw new Error(`Gemini provider returned ${response.status}: ${errorBody.slice(0, 240)}`);
   }
 
   const body = await response.json();
@@ -375,19 +362,10 @@ exports.explainLog = async (req, res) => {
     const input = req.body.log || req.body;
     const result = await callAiJson(
       'You are a senior SOC analyst. Explain a security log with concise risk, likely intent, MITRE mapping, containment, and evidence needed.',
-      input,
-      fallbackLogExplanation
+      input
     );
 
-    if (result.mode !== 'ai') {
-      return res.status(503).json({
-        success: false,
-        mode: 'ai_unavailable',
-        message: `${AI_PROVIDER} API key is not configured, so real AI explanation is unavailable`
-      });
-    }
-
-    result.data = normalizeAiAnalysis(result.data, fallbackLogExplanation(redactSensitive(input)));
+    result.data = normalizeAiAnalysis(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(502).json({
@@ -399,16 +377,31 @@ exports.explainLog = async (req, res) => {
   }
 };
 
+exports.status = async (req, res) => {
+  const baseUrl = AI_PROVIDER === 'gemini' ? GEMINI_BASE_URL : AI_BASE_URL;
+  const hasProviderKey = AI_PROVIDER === 'gemini' ? Boolean(GEMINI_API_KEY) : Boolean(AI_API_KEY);
+
+  res.json({
+    success: true,
+    provider: AI_PROVIDER,
+    model: AI_MODEL,
+    baseUrl,
+    hasProviderKey,
+    requireProvider: AI_REQUIRE_PROVIDER,
+    timeoutMs: AI_TIMEOUT_MS,
+    maxOutputTokens: AI_MAX_OUTPUT_TOKENS
+  });
+};
+
 exports.triageIncident = async (req, res) => {
   try {
     const input = req.body.incident || req.body;
     const result = await callAiJson(
       'You are a senior incident commander. Triage this incident with severity, priorityScore, summary, businessImpact, recommendedActions, containment, mitre, and evidenceNeeded.',
-      input,
-      fallbackIncidentTriage
+      input
     );
 
-    result.data = normalizeAiAnalysis(result.data, fallbackIncidentTriage(redactSensitive(input)));
+    result.data = normalizeAiAnalysis(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(502).json({
@@ -424,11 +417,10 @@ exports.generateReport = async (req, res) => {
   try {
     const result = await callAiJson(
       'You are a SOC reporting assistant. Generate an executive-ready JSON report with title, riskScore, confidence, summary, keyFindings, recommendedActions, and watchlist.',
-      req.body,
-      fallbackReport
+      req.body
     );
 
-    result.data = normalizeReportData(result.data, fallbackReport(redactSensitive(req.body)));
+    result.data = normalizeReportData(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(502).json({
@@ -442,17 +434,6 @@ exports.generateReport = async (req, res) => {
 
 exports.chat = async (req, res) => {
   const message = req.body.message || '';
-  if (isIdentityQuestion(message)) {
-    return res.json({
-      success: true,
-      mode: 'system',
-      data: {
-        answer: MICROSOC_IDENTITY_ANSWER,
-        nextActions: MICROSOC_IDENTITY_ACTIONS
-      }
-    });
-  }
-
   const recentAlerts = await Log.find()
     .sort({ timestamp: -1 })
     .limit(20)
@@ -482,17 +463,10 @@ exports.chat = async (req, res) => {
         'Scope: answer practical security operations questions with concise next actions. You can explain attacks, summarize recent alerts, suggest mitigations, assess severity, and reference MITRE-style techniques.',
         'Use JSON with answer and nextActions. Keep answer under 120 words unless the user asks for detail.'
       ].join(' '),
-      payload,
-      safePayload => ({
-        answer: fallbackChat(safePayload.message, safePayload.context),
-        nextActions: ['Review high severity queue', 'Correlate logs around the event time', 'Document containment actions']
-      })
+      payload
     );
 
-    result.data = normalizeChatData(result.data, {
-      answer: fallbackChat(redactSensitive(payload).message, redactSensitive(payload).context),
-      nextActions: ['Review high severity queue', 'Correlate logs around the event time', 'Document containment actions']
-    });
+    result.data = normalizeChatData(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(502).json({
@@ -506,23 +480,30 @@ exports.chat = async (req, res) => {
 
 exports.naturalSearch = async (req, res) => {
   const query = String(req.body.query || '');
-  const lower = query.toLowerCase();
-  const filters = {
-    severity: ['critical', 'high', 'medium', 'low'].find(item => lower.includes(item)) || null,
-    blocked: lower.includes('blocked') ? true : lower.includes('unblocked') || lower.includes('active') ? false : null,
-    attackType: ['sql injection', 'xss', 'port scan', 'brute force', 'ddos', 'malware', 'phishing']
-      .find(item => lower.includes(item)) || null,
-    sourceIP: query.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/)?.[0] || null,
-    requestId: crypto.randomUUID()
-  };
 
-  res.json({
-    success: true,
-    mode: 'fallback',
-    data: {
-      query,
-      filters,
-      explanation: 'Use these parsed filters to narrow log results in the UI.'
-    }
-  });
+  try {
+    const result = await callAiJson(
+      [
+        'You convert SOC log search text into JSON filters.',
+        'Return JSON with query, filters, and explanation.',
+        'filters may include severity, blocked, attackType, sourceIP, and requestId.',
+        'Use null for unknown filters and keep explanation under 25 words.'
+      ].join(' '),
+      {
+        query,
+        allowedSeverities: ['critical', 'high', 'medium', 'low'],
+        allowedAttackTypes: ['sql injection', 'xss', 'port scan', 'brute force', 'ddos', 'malware', 'phishing'],
+        requestId: crypto.randomUUID()
+      }
+    );
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      mode: 'ai_error',
+      message: 'AI provider is unavailable or rejected the request',
+      detail: error.message
+    });
+  }
 };

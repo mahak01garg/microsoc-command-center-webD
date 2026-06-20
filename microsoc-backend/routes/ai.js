@@ -8,6 +8,7 @@ const aiController = require('../controllers/aiController');
 router.post('/explain-log', aiController.explainLog);
 
 router.use(protect);
+router.get('/status', aiController.status);
 router.post('/triage-incident', aiController.triageIncident);
 router.post('/generate-report', aiController.generateReport);
 router.post('/chat', aiController.chat);
