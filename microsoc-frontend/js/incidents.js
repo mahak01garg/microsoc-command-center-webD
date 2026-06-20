@@ -325,6 +325,56 @@ function normalizeAIList(value) {
     return [String(value)];
 }
 
+function notifyIncidentAI(message, type = 'info') {
+    if (typeof window.showNotification === 'function') {
+        window.showNotification(message, type);
+        return;
+    }
+
+    let stack = document.getElementById('toast-stack');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'toast-stack';
+        stack.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 10000; display: flex; flex-direction: column; gap: 10px; max-width: 380px;';
+        document.body.appendChild(stack);
+    }
+
+    const colors = {
+        info: '#2563eb',
+        success: '#16a34a',
+        warning: '#f59e0b',
+        error: '#dc2626'
+    };
+    const icons = {
+        info: 'fa-info-circle',
+        success: 'fa-check-circle',
+        warning: 'fa-exclamation-triangle',
+        error: 'fa-shield-virus'
+    };
+
+    const notification = document.createElement('div');
+    notification.style.cssText = `
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.96);
+        color: #fff;
+        border-left: 4px solid ${colors[type] || colors.info};
+        box-shadow: 0 10px 30px rgba(0,0,0,0.28);
+        font-size: 14px;
+        line-height: 1.4;
+    `;
+    notification.innerHTML = `
+        <i class="fas ${icons[type] || icons.info}" style="color: ${colors[type] || colors.info};"></i>
+        <span>${escapeHtml(message)}</span>
+    `;
+
+    stack.appendChild(notification);
+    setTimeout(() => notification.remove(), 5200);
+}
+
 function ensureAITriageModal() {
     let modal = document.getElementById('ai-triage-modal');
     if (modal) return modal;
@@ -381,13 +431,15 @@ async function triageIncidentWithAI(id) {
     const incident = incidents.find(i => String(i.id) === String(id));
     if (!incident) return;
 
+    notifyIncidentAI('AI is explaining this incident...', 'info');
+
     try {
         const response = await fetch(`${getApiBaseUrl()}/ai/triage-incident`, {
             method: 'POST',
             headers: getAuthHeaders(),
             body: JSON.stringify({ incident })
         });
-        const payload = await response.json();
+        const payload = await response.json().catch(() => ({}));
         if (!response.ok || !payload.success) {
             throw new Error(payload.message || 'AI triage failed');
         }
@@ -395,7 +447,7 @@ async function triageIncidentWithAI(id) {
         renderAITriage(payload.data, payload.mode);
     } catch (error) {
         console.error('AI incident triage failed:', error);
-        alert('AI triage failed. Please check backend login/session.');
+        notifyIncidentAI(error.message || 'AI triage failed. Please check backend login/session.', 'error');
     }
 }
 

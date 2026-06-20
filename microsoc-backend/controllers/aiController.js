@@ -9,6 +9,11 @@ const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
 const AI_REQUIRE_PROVIDER = String(process.env.AI_REQUIRE_PROVIDER || 'false').toLowerCase() === 'true';
+const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 15000);
+const AI_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 450);
+
+const MICROSOC_IDENTITY_ANSWER = 'I am MicroSOC AI, the SOC assistant built into MicroSOC Command Center. I help analysts triage alerts, explain security logs, summarize incidents, suggest containment steps, and prepare investigation next actions.';
+const MICROSOC_IDENTITY_ACTIONS = ['Ask me to summarize recent alerts', 'Ask for mitigation steps for a specific attack', 'Ask what to prioritize next'];
 
 function redactSensitive(input) {
   const sensitiveKeys = /password|passwd|pwd|token|api[_-]?key|secret/i;
@@ -178,6 +183,21 @@ function fallbackChat(message = '', context = {}) {
   return `I reviewed the available MicroSOC context (${Object.keys(context || {}).join(', ') || 'no extra context'}). Recommended next step: triage open critical/high incidents, inspect related logs, and apply temporary containment before permanent remediation.`;
 }
 
+function isIdentityQuestion(message = '') {
+  return /\b(who\s+are\s+you|what\s+are\s+you|your\s+name|introduce\s+yourself|tum\s+kaun|kaun\s+ho|apna\s+intro)\b/i
+    .test(String(message));
+}
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function callAiJson(systemPrompt, userPayload, fallbackFactory) {
   const safePayload = redactSensitive(userPayload);
   const hasProviderKey = AI_PROVIDER === 'gemini' ? GEMINI_API_KEY : AI_API_KEY;
@@ -275,7 +295,7 @@ function normalizeChatData(data = {}, fallbackData = {}) {
 }
 
 async function callOpenAiJson(systemPrompt, safePayload) {
-  const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
+  const response = await fetchWithTimeout(`${AI_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${AI_API_KEY}`,
@@ -288,6 +308,7 @@ async function callOpenAiJson(systemPrompt, safePayload) {
     body: JSON.stringify({
       model: AI_MODEL,
       temperature: 0.2,
+      max_tokens: AI_MAX_OUTPUT_TOKENS,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: `${systemPrompt}\nReturn only valid JSON.` },
@@ -318,7 +339,7 @@ async function callGeminiJson(systemPrompt, safePayload) {
     JSON.stringify(safePayload)
   ].join('\n\n');
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -332,6 +353,7 @@ async function callGeminiJson(systemPrompt, safePayload) {
       ],
       generationConfig: {
         temperature: 0.2,
+        maxOutputTokens: AI_MAX_OUTPUT_TOKENS,
         responseMimeType: 'application/json'
       }
     })
@@ -419,6 +441,18 @@ exports.generateReport = async (req, res) => {
 };
 
 exports.chat = async (req, res) => {
+  const message = req.body.message || '';
+  if (isIdentityQuestion(message)) {
+    return res.json({
+      success: true,
+      mode: 'system',
+      data: {
+        answer: MICROSOC_IDENTITY_ANSWER,
+        nextActions: MICROSOC_IDENTITY_ACTIONS
+      }
+    });
+  }
+
   const recentAlerts = await Log.find()
     .sort({ timestamp: -1 })
     .limit(20)
@@ -432,7 +466,7 @@ exports.chat = async (req, res) => {
     .lean()
     .catch(() => []);
   const payload = {
-    message: req.body.message || '',
+    message,
     context: {
       ...(req.body.context || {}),
       recentAlerts,
@@ -442,7 +476,12 @@ exports.chat = async (req, res) => {
 
   try {
     const result = await callAiJson(
-      'You are MicroSOC AI Security Analyst. Answer practical SOC questions with clear next actions. You can explain attacks, summarize recent alerts, suggest mitigations, assess severity, and reference MITRE-style techniques. Use JSON with answer and nextActions.',
+      [
+        'You are MicroSOC AI, the built-in SOC assistant for MicroSOC Command Center.',
+        'Identity rule: if asked who you are, say you are MicroSOC AI. Never claim to be an animal, owl, generic chatbot, or unrelated persona.',
+        'Scope: answer practical security operations questions with concise next actions. You can explain attacks, summarize recent alerts, suggest mitigations, assess severity, and reference MITRE-style techniques.',
+        'Use JSON with answer and nextActions. Keep answer under 120 words unless the user asks for detail.'
+      ].join(' '),
       payload,
       safePayload => ({
         answer: fallbackChat(safePayload.message, safePayload.context),

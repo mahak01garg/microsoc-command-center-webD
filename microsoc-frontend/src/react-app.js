@@ -199,7 +199,7 @@
                         }
                     })
                 });
-                const payload = await response.json();
+                const payload = await response.json().catch(() => ({}));
                 if (!response.ok || !payload.success) {
                     throw new Error(payload.message || 'Assistant failed');
                 }
@@ -212,7 +212,7 @@
                 thinking.textContent = `${answer}${nextActions}`;
             } catch (error) {
                 console.error('AI assistant failed:', error);
-                thinking.textContent = 'AI assistant could not respond. Please check backend login/session.';
+                thinking.textContent = error.message || 'MicroSOC AI could not respond right now.';
             }
         });
     }
