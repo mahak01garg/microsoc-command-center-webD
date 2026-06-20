@@ -11,6 +11,7 @@ let itemsPerPage = 25;
 let totalPages = 1;
 const LOG_STORAGE_KEY = 'microsocSecurityLogs';
 const MAX_STORED_LOGS = 1000;
+let logsApiRefreshTimer = null;
 
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'https://microsoc-backend.onrender.com/api';
@@ -27,13 +28,48 @@ function loadStoredLogs() {
 
 function saveStoredLogs() {
     const sortedLogs = [...allLogs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    allLogs = sortedLogs.slice(0, MAX_STORED_LOGS);
-    localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(allLogs));
+    allLogs = sortedLogs;
+    localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(sortedLogs.slice(0, MAX_STORED_LOGS)));
     window.dispatchEvent(new CustomEvent('microsoc:logs-updated', { detail: { logs: allLogs } }));
 }
 
+function getLogId(log) {
+    return String(log?._id || log?.id || `${log?.timestamp || ''}-${log?.sourceIP || ''}-${log?.attackType || ''}`);
+}
+
+function normalizeLog(log) {
+    return {
+        ...log,
+        id: getLogId(log),
+        timestamp: log.timestamp || log.createdAt || new Date().toISOString(),
+        attackType: log.attackType || 'Other',
+        sourceIP: log.sourceIP || '0.0.0.0',
+        targetSystem: log.targetSystem || 'unknown',
+        severity: log.severity || 'medium',
+        country: log.country || 'Unknown',
+        description: log.description || 'Security event detected',
+        isBlocked: Boolean(log.isBlocked),
+        userAgent: log.userAgent || 'Unknown',
+        port: log.port || '-',
+        protocol: log.protocol || 'Other'
+    };
+}
+
+function escapeJsString(value) {
+    return String(value ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function mergeLogs(...groups) {
+    const merged = new Map();
+    groups.flat().filter(Boolean).forEach(log => {
+        const normalized = normalizeLog(log);
+        merged.set(getLogId(normalized), { ...(merged.get(getLogId(normalized)) || {}), ...normalized });
+    });
+    return Array.from(merged.values()).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+}
+
 function syncFilteredLogs() {
-    filterLogs();
+    filterLogs({ skipApi: true });
 }
 
 // Initialize Logs
@@ -57,6 +93,7 @@ function initLogs() {
     
     // Load logs for first page
     loadLogsForPage();
+    refreshLogsFromApi();
 }
 
 // Generate Mock Logs
@@ -153,12 +190,15 @@ function renderLogs() {
             </tr>
         `;
     } else {
-        container.innerHTML = currentLogs.map(log => `
-        <tr class="log-row" data-id="${log.id}">
+        container.innerHTML = currentLogs.map(log => {
+        const logId = getLogId(log);
+        const jsLogId = escapeJsString(logId);
+        return `
+        <tr class="log-row" data-id="${escapeHtml(logId)}">
             <td>
                 <input type="checkbox" class="log-checkbox" 
-                       onchange="toggleLogSelection(${log.id})" 
-                       ${selectedLogs.has(log.id) ? 'checked' : ''}>
+                       onchange="toggleLogSelection('${jsLogId}')" 
+                       ${selectedLogs.has(logId) ? 'checked' : ''}>
             </td>
             <td class="timestamp-cell">
                 <div class="log-time">${formatDate(log.timestamp)}</div>
@@ -166,54 +206,55 @@ function renderLogs() {
             </td>
             <td>
                 <div class="attack-type">
-                    <i class="fas ${getAttackTypeIcon(log.attackType)}"></i>
-                    ${log.attackType}
+                    <i class="fas ${escapeHtml(getAttackTypeIcon(log.attackType))}"></i>
+                    ${escapeHtml(log.attackType)}
                 </div>
             </td>
             <td>
                 <div class="source-ip">
                     <i class="fas fa-network-wired"></i>
-                    ${log.sourceIP}
+                    ${escapeHtml(log.sourceIP)}
                 </div>
             </td>
-            <td>${log.targetSystem}</td>
+            <td>${escapeHtml(log.targetSystem)}</td>
             <td>
                 <span class="badge severity-${log.severity}" 
                       style="background: ${getSeverityColor(log.severity)}">
                     <i class="fas ${log.severity === 'critical' ? 'fa-skull-crossbones' : 
                                     log.severity === 'high' ? 'fa-exclamation-circle' : 
                                     'fa-exclamation-triangle'}"></i>
-                    ${log.severity.toUpperCase()}
+                    ${escapeHtml(log.severity.toUpperCase())}
                 </span>
             </td>
             <td>
                 <div class="country-info">
                     <i class="fas fa-globe-americas"></i>
-                    ${log.country}
+                    ${escapeHtml(log.country)}
                 </div>
             </td>
             <td class="description-cell">
-                ${log.description}
+                ${escapeHtml(log.description)}
                 ${log.isBlocked ? '<span class="badge badge-success">Blocked</span>' : ''}
             </td>
             <td>
                 <div class="log-actions">
-                    <button class="btn-icon" onclick="viewLogDetail(${log.id})" title="View Details">
+                    <button class="btn-icon" onclick="viewLogDetail('${jsLogId}')" title="View Details">
                         <i class="fas fa-eye"></i>
                     </button>
-                    <button class="btn-icon" onclick="showRemediation(${log.id})" title="AI Prevention">
+                    <button class="btn-icon" onclick="showRemediation('${jsLogId}')" title="AI Prevention">
                         <i class="fas fa-lightbulb"></i>
                     </button>
-                    <button class="btn-icon ai-action-btn" onclick="explainLogWithAI(${log.id})" title="AI Explain">
+                    <button class="btn-icon ai-action-btn" onclick="explainLogWithAI('${jsLogId}')" title="AI Explain">
                         <i class="fas fa-brain"></i>
                     </button>
-                    <button class="btn-icon" onclick="createIncidentFromLog(${log.id})" title="Create Incident">
+                    <button class="btn-icon" onclick="createIncidentFromLog('${jsLogId}')" title="Create Incident">
                         <i class="fas fa-exclamation-triangle"></i>
                     </button>
                 </div>
             </td>
         </tr>
-    `).join('');
+    `;
+    }).join('');
     }
     
     // Update counts
@@ -250,8 +291,60 @@ function updateLogStats() {
     document.getElementById('log-count').textContent = allLogs.length;
 }
 
+function buildLogApiQuery() {
+    const params = new URLSearchParams();
+    params.set('page', '1');
+    params.set('limit', '5000');
+    params.set('timeRange', document.getElementById('filter-time')?.value || '24h');
+
+    Array.from(document.getElementById('filter-severity')?.selectedOptions || [])
+        .map(option => option.value)
+        .forEach(value => params.append('severity', value));
+
+    Array.from(document.getElementById('filter-type')?.selectedOptions || [])
+        .map(option => option.value)
+        .forEach(value => params.append('attackType', value));
+
+    const sourceIP = document.getElementById('filter-ip')?.value?.trim();
+    if (sourceIP) params.set('sourceIP', sourceIP);
+
+    const search = document.getElementById('search-logs')?.value?.trim();
+    if (search) params.set('search', search);
+
+    return params;
+}
+
+async function refreshLogsFromApi() {
+    const token = localStorage.getItem('token') || '';
+    if (!token) return;
+
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/logs?${buildLogApiQuery().toString()}`, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            }
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.message || 'Log history sync failed');
+        }
+
+        allLogs = mergeLogs(payload.logs || [], loadStoredLogs());
+        saveStoredLogs();
+        filterLogs({ skipApi: true });
+    } catch (error) {
+        console.warn('Log history sync failed:', error);
+    }
+}
+
+function queueLogsApiRefresh() {
+    clearTimeout(logsApiRefreshTimer);
+    logsApiRefreshTimer = setTimeout(refreshLogsFromApi, 350);
+}
+
 // Filter Logs
-function filterLogs() {
+function filterLogs(options = {}) {
     const severityFilter = Array.from(document.getElementById('filter-severity').selectedOptions)
         .map(option => option.value);
     
@@ -287,6 +380,17 @@ function filterLogs() {
         if (ipFilter && !log.sourceIP.toLowerCase().includes(ipFilter)) {
             return false;
         }
+
+        const searchTerm = document.getElementById('search-logs').value.toLowerCase();
+        if (searchTerm && ![
+            log.description,
+            log.sourceIP,
+            log.targetSystem,
+            log.attackType,
+            log.country
+        ].some(value => String(value || '').toLowerCase().includes(searchTerm))) {
+            return false;
+        }
         
         // Filter by time
         if (timeLimit > 0 && new Date(log.timestamp).getTime() < timeLimit) {
@@ -299,26 +403,14 @@ function filterLogs() {
     // Reset to first page
     currentPage = 1;
     loadLogsForPage();
+    if (!options.skipApi) {
+        queueLogsApiRefresh();
+    }
 }
 
 // Search Logs
 function searchLogs() {
-    const searchTerm = document.getElementById('search-logs').value.toLowerCase();
-    
-    if (!searchTerm) {
-        filteredLogs = [...allLogs];
-    } else {
-        filteredLogs = allLogs.filter(log => 
-            log.description.toLowerCase().includes(searchTerm) ||
-            log.sourceIP.toLowerCase().includes(searchTerm) ||
-            log.targetSystem.toLowerCase().includes(searchTerm) ||
-            log.attackType.toLowerCase().includes(searchTerm) ||
-            log.country.toLowerCase().includes(searchTerm)
-        );
-    }
-    
-    currentPage = 1;
-    loadLogsForPage();
+    filterLogs();
 }
 
 // Apply Filters (explicit)
@@ -450,10 +542,11 @@ function buildLiveDescription(attackType, targetSystem) {
 
 // Log Selection Functions
 function toggleLogSelection(logId) {
-    if (selectedLogs.has(logId)) {
-        selectedLogs.delete(logId);
+    const id = String(logId);
+    if (selectedLogs.has(id)) {
+        selectedLogs.delete(id);
     } else {
-        selectedLogs.add(logId);
+        selectedLogs.add(id);
     }
     
     updateSelectedCount();
@@ -464,10 +557,10 @@ function selectAllLogs() {
     const checkboxes = document.querySelectorAll('.log-checkbox');
     
     if (selectAll) {
-        currentLogs.forEach(log => selectedLogs.add(log.id));
+        currentLogs.forEach(log => selectedLogs.add(getLogId(log)));
         checkboxes.forEach(cb => cb.checked = true);
     } else {
-        currentLogs.forEach(log => selectedLogs.delete(log.id));
+        currentLogs.forEach(log => selectedLogs.delete(getLogId(log)));
         checkboxes.forEach(cb => cb.checked = false);
     }
     
@@ -497,8 +590,9 @@ function clearSelection() {
 
 // View Log Details
 function viewLogDetail(logId) {
-    const log = allLogs.find(l => l.id === logId);
+    const log = allLogs.find(l => getLogId(l) === String(logId));
     if (!log) return;
+    const jsLogId = escapeJsString(getLogId(log));
     
     const content = document.getElementById('log-detail-content');
     content.innerHTML = `
@@ -507,7 +601,7 @@ function viewLogDetail(logId) {
                 <h4>Basic Information</h4>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Log ID:</span>
-                    ${log.id}
+                    ${escapeHtml(getLogId(log))}
                 </div>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Timestamp:</span>
@@ -516,14 +610,14 @@ function viewLogDetail(logId) {
                 <div class="log-detail-item">
                     <span class="log-detail-label">Attack Type:</span>
                     <span class="badge" style="background: ${getSeverityColor(log.severity)}">
-                        ${log.attackType}
+                        ${escapeHtml(log.attackType)}
                     </span>
                 </div>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Severity:</span>
                     <span class="badge severity-${log.severity}" 
                           style="background: ${getSeverityColor(log.severity)}">
-                        ${log.severity.toUpperCase()}
+                        ${escapeHtml(log.severity.toUpperCase())}
                     </span>
                 </div>
             </div>
@@ -532,23 +626,23 @@ function viewLogDetail(logId) {
                 <h4>Network Information</h4>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Source IP:</span>
-                    ${log.sourceIP}
+                    ${escapeHtml(log.sourceIP)}
                 </div>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Target System:</span>
-                    ${log.targetSystem}
+                    ${escapeHtml(log.targetSystem)}
                 </div>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Country:</span>
-                    <i class="fas fa-globe-americas"></i> ${log.country}
+                    <i class="fas fa-globe-americas"></i> ${escapeHtml(log.country)}
                 </div>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Port:</span>
-                    ${log.port}
+                    ${escapeHtml(log.port)}
                 </div>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Protocol:</span>
-                    ${log.protocol}
+                    ${escapeHtml(log.protocol)}
                 </div>
             </div>
             
@@ -556,7 +650,7 @@ function viewLogDetail(logId) {
                 <h4>Attack Details</h4>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Description:</span>
-                    ${log.description}
+                    ${escapeHtml(log.description)}
                 </div>
                 <div class="log-detail-item">
                     <span class="log-detail-label">Status:</span>
@@ -566,20 +660,20 @@ function viewLogDetail(logId) {
                 </div>
                 <div class="log-detail-item">
                     <span class="log-detail-label">User Agent:</span>
-                    ${log.userAgent}
+                    ${escapeHtml(log.userAgent)}
                 </div>
             </div>
             
             <div class="log-detail-section">
                 <h4>Actions</h4>
                 <div style="display: flex; flex-direction: column; gap: 10px;">
-                    <button class="btn btn-primary" onclick="createIncidentFromLog(${log.id}); closeLogModal()">
+                    <button class="btn btn-primary" onclick="createIncidentFromLog('${jsLogId}'); closeLogModal()">
                         <i class="fas fa-exclamation-triangle"></i> Create Incident
                     </button>
-                    <button class="btn btn-outline" onclick="showRemediation(${log.id})">
+                    <button class="btn btn-outline" onclick="showRemediation('${jsLogId}')">
                         <i class="fas fa-lightbulb"></i> AI Prevention
                     </button>
-                    <button class="btn btn-outline" onclick="exportSingleLog(${log.id})">
+                    <button class="btn btn-outline" onclick="exportSingleLog('${jsLogId}')">
                         <i class="fas fa-download"></i> Export Log
                     </button>
                 </div>
@@ -622,14 +716,13 @@ async function showRemediation(logId) {
         }
 
         const result = payload.data || {};
-        if (payload.mode !== 'ai') {
-            throw new Error('AI provider did not generate this response');
-        }
-        const actions = result.recommendedActions || [];
-        const containment = result.containment || [];
-        const evidence = result.evidenceNeeded || [];
+        const actions = normalizeAIList(result.recommendedActions || result.actions);
+        const containment = normalizeAIList(result.containment);
+        const evidence = normalizeAIList(result.evidenceNeeded || result.evidence);
+        const modeLabel = payload.mode === 'ai' ? 'Model assisted' : 'Local guidance';
 
         content.innerHTML = `
+            <div class="ai-result-meta"><span class="ai-chip">${escapeHtml(modeLabel)}</span></div>
             <h4>${escapeHtml(result.title || `${log.attackType} prevention`)}</h4>
             <p>${escapeHtml(result.summary || result.likelyIntent || log.description)}</p>
             ${actions.length ? `<strong>Prevention actions</strong><ul class="remediation-list">${actions.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
@@ -671,6 +764,23 @@ function escapeHtml(value) {
         .replace(/'/g, '&#039;');
 }
 
+function normalizeAIList(value) {
+    if (Array.isArray(value)) {
+        return value.flatMap(item => normalizeAIList(item)).filter(Boolean);
+    }
+    if (value && typeof value === 'object') {
+        return Object.values(value).flatMap(item => normalizeAIList(item)).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+        return value
+            .split(/\n|(?:^|\s)\d+\.\s+|[;•]/)
+            .map(item => item.replace(/^[-*]\s*/, '').trim())
+            .filter(Boolean);
+    }
+    if (value === null || value === undefined) return [];
+    return [String(value)];
+}
+
 function ensureAIResultModal() {
     let modal = document.getElementById('ai-result-modal');
     if (modal) return modal;
@@ -697,10 +807,10 @@ function ensureAIResultModal() {
 function showAIResult(title, result, mode = 'fallback') {
     const modal = ensureAIResultModal();
     const content = document.getElementById('ai-result-content');
-    const recommendations = result.recommendedActions || [];
-    const containment = result.containment || [];
-    const evidence = result.evidenceNeeded || [];
-    const mitre = result.mitre || [];
+    const recommendations = normalizeAIList(result.recommendedActions || result.actions);
+    const containment = normalizeAIList(result.containment);
+    const evidence = normalizeAIList(result.evidenceNeeded || result.evidence);
+    const mitre = normalizeAIList(result.mitre || result.mitreMapping);
 
     content.innerHTML = `
         <div class="ai-result-meta">
@@ -724,7 +834,7 @@ function closeAIResultModal() {
 }
 
 async function explainLogWithAI(logId) {
-    const log = allLogs.find(l => l.id === logId);
+    const log = allLogs.find(l => getLogId(l) === String(logId));
     if (!log) return;
 
     showNotification('AI is explaining this log...', 'info');
@@ -733,20 +843,19 @@ async function explainLogWithAI(logId) {
         const response = await fetch(`${getApiBaseUrl()}/ai/explain-log`, {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+                'Content-Type': 'application/json'
             },
             body: JSON.stringify({ log })
         });
-        const payload = await response.json();
+        const payload = await response.json().catch(() => ({}));
         if (!response.ok || !payload.success) {
             throw new Error(payload.message || 'AI analysis failed');
         }
 
-        showAIResult(`Log #${log.id} AI Explanation`, payload.data, payload.mode);
+        showAIResult(`Log #${getLogId(log)} AI Explanation`, payload.data, payload.mode);
     } catch (error) {
         console.error('AI log explanation failed:', error);
-        showNotification('AI explanation failed. Please check backend login/session.', 'error');
+        showNotification(error.message || 'AI provider could not explain this log right now.', 'error');
     }
 }
 
@@ -823,7 +932,7 @@ function updateIncidentCount(delta = 1) {
 
 // Create Incident from Log
 async function createIncidentFromLog(logId) {
-    const log = allLogs.find(l => l.id === logId);
+    const log = allLogs.find(l => getLogId(l) === String(logId));
     if (!log) return;
 
     const incident = buildIncidentFromLog(log);
@@ -851,7 +960,7 @@ async function createIncidentFromSelected() {
     if (selectedLogs.size === 0) return;
     
     const selectedLogIds = Array.from(selectedLogs);
-    const selectedLogData = allLogs.filter(log => selectedLogs.has(log.id));
+    const selectedLogData = allLogs.filter(log => selectedLogs.has(getLogId(log)));
     const highestSeverity = ['critical', 'high', 'medium', 'low'].find(level =>
         selectedLogData.some(log => log.severity === level)
     ) || 'medium';
@@ -894,7 +1003,7 @@ async function createIncidentFromSelected() {
 // Create Incident from Current Log (in modal)
 function createIncidentFromCurrentLog() {
     const modal = document.getElementById('log-detail-modal');
-    const logId = Number(modal?.querySelector('.log-detail-item')?.textContent?.match(/\d+/)?.[0]);
+    const logId = modal?.querySelector('.log-detail-item')?.textContent?.replace('Log ID:', '').trim();
     if (logId) createIncidentFromLog(logId);
     closeLogModal();
 }
@@ -922,7 +1031,7 @@ function exportSelectedLogs() {
         return;
     }
     
-    const selectedLogData = allLogs.filter(log => selectedLogs.has(log.id));
+    const selectedLogData = allLogs.filter(log => selectedLogs.has(getLogId(log)));
     const dataStr = JSON.stringify(selectedLogData, null, 2);
     const dataBlob = new Blob([dataStr], {type: 'application/json'});
     
@@ -940,7 +1049,7 @@ function exportSelectedLogs() {
 }
 
 function exportSingleLog(logId) {
-    const log = allLogs.find(l => l.id === logId);
+    const log = allLogs.find(l => getLogId(l) === String(logId));
     if (!log) return;
     
     const dataStr = JSON.stringify(log, null, 2);
@@ -982,8 +1091,8 @@ function deleteSelectedLogs() {
     
     if (confirm(`Are you sure you want to delete ${selectedLogs.size} selected logs?`)) {
         // Remove selected logs
-        allLogs = allLogs.filter(log => !selectedLogs.has(log.id));
-        filteredLogs = filteredLogs.filter(log => !selectedLogs.has(log.id));
+        allLogs = allLogs.filter(log => !selectedLogs.has(getLogId(log)));
+        filteredLogs = filteredLogs.filter(log => !selectedLogs.has(getLogId(log)));
         const deletedCount = selectedLogs.size;
         saveStoredLogs();
         

@@ -76,14 +76,18 @@ exports.getLogs = async (req, res) => {
     const sort = {};
     sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
 
+    const pageNumber = Math.max(1, parseInt(page, 10) || 1);
+    const limitNumber = Math.min(5000, Math.max(1, parseInt(limit, 10) || 25));
+
     // Execute query with pagination
     const logs = await Log.find(query)
       .sort(sort)
-      .limit(parseInt(limit))
-      .skip((parseInt(page) - 1) * parseInt(limit));
+      .limit(limitNumber)
+      .skip((pageNumber - 1) * limitNumber)
+      .lean();
 
     const total = await Log.countDocuments(query);
-    const totalPages = Math.ceil(total / limit);
+    const totalPages = Math.ceil(total / limitNumber);
 
     // Get statistics for current filters
     const stats = await Log.getStatistics(timeRange);
@@ -92,9 +96,9 @@ exports.getLogs = async (req, res) => {
       success: true,
       count: logs.length,
       total,
-      page: parseInt(page),
+      page: pageNumber,
       totalPages,
-      logs,
+      logs: logs.map(log => ({ ...log, id: String(log._id) })),
       stats
     });
   } catch (error) {

@@ -308,6 +308,23 @@ function escapeHtml(value) {
         .replace(/'/g, '&#039;');
 }
 
+function normalizeAIList(value) {
+    if (Array.isArray(value)) {
+        return value.flatMap(item => normalizeAIList(item)).filter(Boolean);
+    }
+    if (value && typeof value === 'object') {
+        return Object.values(value).flatMap(item => normalizeAIList(item)).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+        return value
+            .split(/\n|(?:^|\s)\d+\.\s+|[;•]/)
+            .map(item => item.replace(/^[-*]\s*/, '').trim())
+            .filter(Boolean);
+    }
+    if (value === null || value === undefined) return [];
+    return [String(value)];
+}
+
 function ensureAITriageModal() {
     let modal = document.getElementById('ai-triage-modal');
     if (modal) return modal;
@@ -334,10 +351,10 @@ function ensureAITriageModal() {
 function renderAITriage(result, mode = 'fallback') {
     const modal = ensureAITriageModal();
     const content = document.getElementById('ai-triage-content');
-    const actions = result.recommendedActions || [];
-    const containment = result.containment || [];
-    const evidence = result.evidenceNeeded || [];
-    const mitre = result.mitre || [];
+    const actions = normalizeAIList(result.recommendedActions || result.actions);
+    const containment = normalizeAIList(result.containment);
+    const evidence = normalizeAIList(result.evidenceNeeded || result.evidence);
+    const mitre = normalizeAIList(result.mitre || result.mitreMapping);
 
     content.innerHTML = `
         <div class="ai-result-meta">

@@ -8,7 +8,7 @@ const AI_BASE_URL = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').rep
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
-const AI_REQUIRE_PROVIDER = String(process.env.AI_REQUIRE_PROVIDER || 'true').toLowerCase() !== 'false';
+const AI_REQUIRE_PROVIDER = String(process.env.AI_REQUIRE_PROVIDER || 'false').toLowerCase() === 'true';
 
 function redactSensitive(input) {
   const sensitiveKeys = /password|passwd|pwd|token|api[_-]?key|secret/i;
@@ -217,6 +217,63 @@ function parseAiJson(content) {
   }
 }
 
+function normalizeStringArray(value) {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap(item => normalizeStringArray(item))
+      .filter(Boolean);
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value)
+      .flatMap(item => normalizeStringArray(item))
+      .filter(Boolean);
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/\n|(?:^|\s)\d+\.\s+|[;•]/)
+      .map(item => item.replace(/^[-*]\s*/, '').trim())
+      .filter(Boolean);
+  }
+  if (value === null || value === undefined) return [];
+  return [String(value)];
+}
+
+function normalizeAiAnalysis(data = {}, fallbackData = {}) {
+  const merged = { ...fallbackData, ...(data && typeof data === 'object' ? data : {}) };
+  return {
+    ...merged,
+    risk: Number.isFinite(Number(merged.risk)) ? Math.max(0, Math.min(100, Number(merged.risk))) : fallbackData.risk,
+    priorityScore: Number.isFinite(Number(merged.priorityScore))
+      ? Math.max(0, Math.min(100, Number(merged.priorityScore)))
+      : fallbackData.priorityScore,
+    recommendedActions: normalizeStringArray(merged.recommendedActions || merged.actions || fallbackData.recommendedActions),
+    containment: normalizeStringArray(merged.containment || fallbackData.containment),
+    mitre: normalizeStringArray(merged.mitre || merged.mitreMapping || fallbackData.mitre),
+    evidenceNeeded: normalizeStringArray(merged.evidenceNeeded || merged.evidence || fallbackData.evidenceNeeded)
+  };
+}
+
+function normalizeReportData(data = {}, fallbackData = {}) {
+  const merged = { ...fallbackData, ...(data && typeof data === 'object' ? data : {}) };
+  return {
+    ...merged,
+    riskScore: Number.isFinite(Number(merged.riskScore)) ? Math.max(0, Math.min(100, Number(merged.riskScore))) : fallbackData.riskScore,
+    confidence: Number.isFinite(Number(merged.confidence)) ? Math.max(0, Math.min(100, Number(merged.confidence))) : fallbackData.confidence,
+    keyFindings: normalizeStringArray(merged.keyFindings || fallbackData.keyFindings),
+    recommendedActions: normalizeStringArray(merged.recommendedActions || merged.actions || fallbackData.recommendedActions),
+    watchlist: normalizeStringArray(merged.watchlist || fallbackData.watchlist)
+  };
+}
+
+function normalizeChatData(data = {}, fallbackData = {}) {
+  const merged = { ...fallbackData, ...(data && typeof data === 'object' ? data : {}) };
+  return {
+    ...merged,
+    answer: String(merged.answer || fallbackData.answer || ''),
+    nextActions: normalizeStringArray(merged.nextActions || merged.recommendedActions || fallbackData.nextActions)
+  };
+}
+
 async function callOpenAiJson(systemPrompt, safePayload) {
   const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
     method: 'POST',
@@ -293,12 +350,22 @@ async function callGeminiJson(systemPrompt, safePayload) {
 
 exports.explainLog = async (req, res) => {
   try {
+    const input = req.body.log || req.body;
     const result = await callAiJson(
       'You are a senior SOC analyst. Explain a security log with concise risk, likely intent, MITRE mapping, containment, and evidence needed.',
-      req.body.log || req.body,
+      input,
       fallbackLogExplanation
     );
 
+    if (result.mode !== 'ai') {
+      return res.status(503).json({
+        success: false,
+        mode: 'ai_unavailable',
+        message: `${AI_PROVIDER} API key is not configured, so real AI explanation is unavailable`
+      });
+    }
+
+    result.data = normalizeAiAnalysis(result.data, fallbackLogExplanation(redactSensitive(input)));
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(502).json({
@@ -312,12 +379,14 @@ exports.explainLog = async (req, res) => {
 
 exports.triageIncident = async (req, res) => {
   try {
+    const input = req.body.incident || req.body;
     const result = await callAiJson(
       'You are a senior incident commander. Triage this incident with severity, priorityScore, summary, businessImpact, recommendedActions, containment, mitre, and evidenceNeeded.',
-      req.body.incident || req.body,
+      input,
       fallbackIncidentTriage
     );
 
+    result.data = normalizeAiAnalysis(result.data, fallbackIncidentTriage(redactSensitive(input)));
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(502).json({
@@ -337,6 +406,7 @@ exports.generateReport = async (req, res) => {
       fallbackReport
     );
 
+    result.data = normalizeReportData(result.data, fallbackReport(redactSensitive(req.body)));
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(502).json({
@@ -380,6 +450,10 @@ exports.chat = async (req, res) => {
       })
     );
 
+    result.data = normalizeChatData(result.data, {
+      answer: fallbackChat(redactSensitive(payload).message, redactSensitive(payload).context),
+      nextActions: ['Review high severity queue', 'Correlate logs around the event time', 'Document containment actions']
+    });
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(502).json({
