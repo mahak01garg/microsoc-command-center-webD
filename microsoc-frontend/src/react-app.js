@@ -588,9 +588,7 @@
         refreshLiveCounts(root);
         if (route === 'dashboard') {
             refreshLegacyDashboardData(root);
-            renderThreatFeed(root);
             renderAttackVisualization(root);
-            renderThreatIntel(root);
         }
         if (route === 'logs') renderThreatFeed(root);
         if (route === 'incidents') {
@@ -598,9 +596,9 @@
             renderIncidentConsole(root);
         }
         if (route === 'analytics') {
-            renderAttackVisualization(root);
             renderThreatIntel(root);
         }
+        applyRoleRestrictions(root);
     }
 
     function findContentHost(root) {
@@ -613,6 +611,38 @@
         } catch (error) {
             return {};
         }
+    }
+
+    function isAdminUser() {
+        return (currentUser().role || 'analyst') === 'admin';
+    }
+
+    function applyRoleRestrictions(root) {
+        const role = currentUser().role || 'analyst';
+        root.dataset.userRole = role;
+
+        if (role === 'admin') return;
+
+        const adminOnlyMatchers = [
+            /user management/i,
+            /assign roles?/i,
+            /system settings/i,
+            /threat feed configuration/i,
+            /audit logs?/i
+        ];
+
+        root.querySelectorAll('[onclick], button, a, select, input').forEach((element) => {
+            const action = element.getAttribute('onclick') || '';
+            const label = element.textContent || element.getAttribute('title') || element.getAttribute('aria-label') || '';
+            const adminOnlyAction = /delete|clearLogs|deleteSelectedLogs|assignRole|userManagement|systemSettings|threatFeedConfig|audit/i.test(action);
+            const adminOnlyLabel = adminOnlyMatchers.some((matcher) => matcher.test(label));
+
+            if (adminOnlyAction || adminOnlyLabel) {
+                const container = element.closest('li, .card, .form-group, .log-controls, .ticket-actions') || element;
+                container.classList.add('admin-only-hidden');
+                container.setAttribute('hidden', '');
+            }
+        });
     }
 
     async function refreshLiveCounts(root) {
@@ -710,6 +740,7 @@
             <div class="role-actions">
                 <span><i class="fas fa-user-shield"></i> ${role.toUpperCase()}</span>
                 <span><i class="fas fa-bell"></i> Auto-refresh on</span>
+                ${role === 'admin' ? '<span><i class="fas fa-lock-open"></i> Admin controls enabled</span>' : '<span><i class="fas fa-lock"></i> Admin controls hidden</span>'}
             </div>
         `;
         host.insertAdjacentElement(host.classList.contains('threat-ribbon') ? 'afterend' : 'afterbegin', strip);
@@ -897,6 +928,56 @@
         map.innerHTML = '<div class="empty-state">Loading live attack sources...</div>';
         bars.innerHTML = '<div class="empty-state">Loading live trends...</div>';
 
+        function loadLocalSecurityLogs() {
+            try {
+                const logs = JSON.parse(localStorage.getItem('microsocSecurityLogs') || '[]');
+                return Array.isArray(logs) ? logs : [];
+            } catch (error) {
+                return [];
+            }
+        }
+
+        function buildHourlyTrendFromLogs(logs) {
+            const now = Date.now();
+            const oneDayAgo = now - (24 * 60 * 60 * 1000);
+            const buckets = new Map();
+
+            logs.forEach((log) => {
+                const timestamp = new Date(log.timestamp || log.createdAt).getTime();
+                if (!Number.isFinite(timestamp) || timestamp < oneDayAgo) return;
+
+                const date = new Date(timestamp);
+                const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}-${date.getHours()}`;
+                const current = buckets.get(key) || {
+                    _id: { day: date.getDate(), hour: date.getHours() },
+                    count: 0,
+                    timestamp
+                };
+                current.count += 1;
+                buckets.set(key, current);
+            });
+
+            return Array.from(buckets.values()).sort((a, b) => a.timestamp - b.timestamp);
+        }
+
+        function renderTrendBars(hourlyTrend) {
+            const maxTrend = Math.max(...hourlyTrend.map(item => item.count || 1), 1);
+            bars.innerHTML = hourlyTrend.length
+                ? hourlyTrend.map((item) => {
+                    const value = item.count || 0;
+                    const label = item._id?.hour !== undefined ? `${String(item._id.hour).padStart(2, '0')}:00` : 'bucket';
+                    const height = Math.max(12, (value / maxTrend) * 220);
+                    return `
+                        <div class="trend-bar-item" title="${label}: ${value} attacks">
+                            <span style="height:${height}px"></span>
+                            <strong>${value}</strong>
+                            <small>${label}</small>
+                        </div>
+                    `;
+                }).join('')
+                : '<div class="empty-state">No trend data yet. Start live stream to generate local trend bars.</div>';
+        }
+
         try {
             const [realtime, stats] = await Promise.all([
                 apiRequest('/dashboard/realtime'),
@@ -920,19 +1001,14 @@
                 }).join('')
                 : '<div class="empty-state">No source IP activity yet.</div>';
 
-            const hourlyTrend = stats.stats?.hourlyTrend || [];
-            const maxTrend = Math.max(...hourlyTrend.map(item => item.count || 1), 1);
-            bars.innerHTML = hourlyTrend.length
-                ? hourlyTrend.map((item) => {
-                    const value = item.count || 0;
-                    const label = item._id?.hour !== undefined ? `${item._id.hour}:00` : 'bucket';
-                    return `<span style="height:${Math.max(8, (value / maxTrend) * 220)}px" title="${label}: ${value} attacks"></span>`;
-                }).join('')
-                : '<div class="empty-state">No trend data yet.</div>';
+            const hourlyTrend = stats.stats?.hourlyTrend?.length
+                ? stats.stats.hourlyTrend
+                : buildHourlyTrendFromLogs(loadLocalSecurityLogs());
+            renderTrendBars(hourlyTrend);
         } catch (error) {
             console.error('Attack visualization failed:', error);
             map.innerHTML = '<div class="empty-state">Live attack sources unavailable.</div>';
-            bars.innerHTML = '<div class="empty-state">Live trends unavailable.</div>';
+            renderTrendBars(buildHourlyTrendFromLogs(loadLocalSecurityLogs()));
         }
     }
 

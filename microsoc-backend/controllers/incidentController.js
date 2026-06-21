@@ -145,7 +145,11 @@ exports.getIncidentById = async (req, res) => {
 // @access  Private
 exports.createIncident = async (req, res) => {
   try {
-    const incidentData = req.body;
+    const incidentData = { ...req.body };
+
+    if (req.user.role !== 'admin') {
+      delete incidentData.assignedTo;
+    }
     
     // Set created by
     incidentData.createdBy = req.user.id;
@@ -184,7 +188,12 @@ exports.createIncident = async (req, res) => {
 exports.updateIncident = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateData = req.body;
+    const updateData = { ...req.body };
+
+    if (req.user.role !== 'admin') {
+      delete updateData.assignedTo;
+      delete updateData.createdBy;
+    }
 
     const incident = await Incident.findById(id);
 

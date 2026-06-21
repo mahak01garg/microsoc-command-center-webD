@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../middleware/auth');
+const { protect, authorizeRoles } = require('../middleware/auth');
 const incidentController = require('../controllers/incidentController');
 
 // All routes require authentication
@@ -33,8 +33,8 @@ router.put('/:id', incidentController.updateIncident);
 
 // @route   DELETE /api/incidents/:id
 // @desc    Delete incident
-// @access  Private
-router.delete('/:id', incidentController.deleteIncident);
+// @access  Admin
+router.delete('/:id', authorizeRoles('admin'), incidentController.deleteIncident);
 
 // @route   PUT /api/incidents/:id/status
 // @desc    Update incident status
@@ -43,8 +43,8 @@ router.put('/:id/status', incidentController.updateStatus);
 
 // @route   PUT /api/incidents/:id/assign
 // @desc    Assign incident to user
-// @access  Private
-router.put('/:id/assign', incidentController.assignIncident);
+// @access  Admin
+router.put('/:id/assign', authorizeRoles('admin'), incidentController.assignIncident);
 
 // @route   POST /api/incidents/:id/timeline
 // @desc    Add timeline event

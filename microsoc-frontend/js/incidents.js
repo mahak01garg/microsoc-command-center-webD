@@ -13,6 +13,18 @@ function getAuthHeaders() {
     };
 }
 
+function getCurrentUserRole() {
+    try {
+        return JSON.parse(localStorage.getItem('user') || '{}').role || 'analyst';
+    } catch (error) {
+        return 'analyst';
+    }
+}
+
+function isAdminUser() {
+    return getCurrentUserRole() === 'admin';
+}
+
 // Load Incidents
 async function loadIncidents() {
     try {
@@ -188,6 +200,13 @@ function openNewIncidentModal() {
     if (!modal) return;
     const assigneeSelect = document.getElementById('incident-assignee');
     if (assigneeSelect) {
+        const assigneeGroup = assigneeSelect.closest('.form-group') || assigneeSelect.parentElement;
+        if (!isAdminUser()) {
+            assigneeSelect.value = '';
+            if (assigneeGroup) assigneeGroup.style.display = 'none';
+        } else if (assigneeGroup) {
+            assigneeGroup.style.display = '';
+        }
         const user = JSON.parse(localStorage.getItem('user') || '{}');
         const userId = user.id || user._id;
         assigneeSelect.innerHTML = '<option value="">Unassigned</option>';
@@ -218,6 +237,19 @@ async function createNewIncident() {
     const description = document.getElementById('incident-description').value;
     const severity = document.getElementById('incident-severity').value;
     const assignee = document.getElementById('incident-assignee').value;
+    const incidentPayload = {
+        title,
+        description,
+        severity,
+        status: 'open',
+        category: 'other',
+        priority: severity,
+        impact: severity
+    };
+
+    if (isAdminUser() && /^[a-f\d]{24}$/i.test(assignee)) {
+        incidentPayload.assignedTo = assignee;
+    }
 
     if (!title.trim() || !description.trim()) {
         alert('Please enter a title and description.');
@@ -228,16 +260,7 @@ async function createNewIncident() {
         const response = await fetch(`${getApiBaseUrl()}/incidents`, {
             method: 'POST',
             headers: getAuthHeaders(),
-            body: JSON.stringify({
-                title,
-                description,
-                severity,
-                status: 'open',
-                assignedTo: /^[a-f\d]{24}$/i.test(assignee) ? assignee : undefined,
-                category: 'other',
-                priority: severity,
-                impact: severity
-            })
+            body: JSON.stringify(incidentPayload)
         });
         const payload = await response.json();
         if (!response.ok || !payload.success) {

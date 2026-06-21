@@ -30,9 +30,9 @@
     --primary-dark: #bd2130;
     
     /* Secondary Colors */
-    --secondary-color: #6c757d;
-    --secondary-hover: #5a6268;
-    --secondary-light: rgba(108, 117, 125, 0.1);
+    --secondary-color: #0e7490;
+    --secondary-hover: #155e75;
+    --secondary-light: rgba(14, 116, 144, 0.08);
     
     /* Status Colors */
     --success-color: #28a745;
@@ -45,34 +45,34 @@
     --info-light: rgba(23, 162, 184, 0.1);
     
     /* Background Colors */
-    --bg-primary: #f8f9fa;
+    --bg-primary: #ffffff;
     --bg-secondary: #ffffff;
-    --bg-tertiary: #f1f3f5;
+    --bg-tertiary: #f7fdff;
     --bg-overlay: rgba(255, 255, 255, 0.95);
     
     /* Text Colors */
     --text-primary: #212529;
-    --text-secondary: #6c757d;
-    --text-tertiary: #868e96;
+    --text-secondary: #164e63;
+    --text-tertiary: #0e7490;
     --text-inverse: #ffffff;
-    --text-muted: #adb5bd;
+    --text-muted: #18728a;
     
     /* Border Colors */
-    --border-color: #dee2e6;
-    --border-light: #e9ecef;
-    --border-dark: #ced4da;
+    --border-color: #ccecf3;
+    --border-light: #e8faff;
+    --border-dark: #9bd8e5;
     
     /* UI Element Colors */
     --card-bg: #ffffff;
     --input-bg: #ffffff;
-    --input-border: #ced4da;
+    --input-border: #9bd8e5;
     --input-focus: #80bdff;
-    --sidebar-bg: #343a40;
+    --sidebar-bg: #ffffff;
     --header-bg: #ffffff;
     --modal-bg: #ffffff;
-    --table-header-bg: #f8f9fa;
-    --table-row-hover: #f8f9fa;
-    --table-border: #dee2e6;
+    --table-header-bg: #f7fdff;
+    --table-row-hover: #fff7f7;
+    --table-border: #ccecf3;
     
     /* Shadow Colors */
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
@@ -83,9 +83,9 @@
     --shadow-inner: inset 0 2px 4px rgba(0, 0, 0, 0.05);
     
     /* Scrollbar Colors */
-    --scrollbar-track: #f1f3f5;
-    --scrollbar-thumb: #adb5bd;
-    --scrollbar-thumb-hover: #6c757d;
+    --scrollbar-track: #ffffff;
+    --scrollbar-thumb: #9bd8e5;
+    --scrollbar-thumb-hover: #0e7490;
     
     /* Special Elements */
     --selection-bg: rgba(220, 53, 69, 0.2);
@@ -94,10 +94,10 @@
     --overlay-bg: rgba(33, 37, 41, 0.9);
     
     /* Code and Pre */
-    --code-bg: #f8f9fa;
+    --code-bg: #f7fdff;
     --code-color: #e83e8c;
-    --pre-bg: #f8f9fa;
-    --pre-border: #dee2e6;
+    --pre-bg: #f7fdff;
+    --pre-border: #ccecf3;
 }
 
 /* Base Elements */

@@ -6,12 +6,36 @@ let currentLogs = [];
 let selectedLogs = new Set();
 let isLiveStreaming = false;
 let liveStreamInterval = null;
+let liveStreamFirstTimer = null;
+let liveRenderTimer = null;
+let pendingLiveLogs = [];
+let lastLiveNotificationAt = 0;
 let currentPage = 1;
 let itemsPerPage = 25;
 let totalPages = 1;
 const LOG_STORAGE_KEY = 'microsocSecurityLogs';
 const MAX_STORED_LOGS = 1000;
+const LIVE_STREAM_INTERVAL_MS = 3000;
+const LIVE_STREAM_FIRST_DELAY_MS = 1200;
+const LIVE_RENDER_DEBOUNCE_MS = 250;
+const LIVE_NOTIFICATION_MIN_GAP_MS = 9000;
 let logsApiRefreshTimer = null;
+
+function getCurrentUserRole() {
+    try {
+        return JSON.parse(localStorage.getItem('user') || '{}').role || 'analyst';
+    } catch (error) {
+        return 'analyst';
+    }
+}
+
+function isAdminUser() {
+    return getCurrentUserRole() === 'admin';
+}
+
+function canManageLogs() {
+    return isAdminUser();
+}
 
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'https://microsoc-backend.onrender.com/api';
@@ -74,6 +98,10 @@ function syncFilteredLogs() {
 
 // Initialize Logs
 function initLogs() {
+    isLiveStreaming = false;
+    stopLiveStreamTimers();
+    pendingLiveLogs = [];
+
     allLogs = loadStoredLogs().sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     filteredLogs = [...allLogs];
     
@@ -83,10 +111,7 @@ function initLogs() {
         option.selected = true;
     });
 
-    const liveBtn = document.getElementById('live-btn');
-    const pauseBtn = document.getElementById('pause-btn');
-    if (liveBtn) liveBtn.disabled = false;
-    if (pauseBtn) pauseBtn.disabled = true;
+    updateLiveStreamControls();
     
     // Update stats
     updateLogStats();
@@ -471,28 +496,62 @@ function startLiveStream() {
     if (isLiveStreaming) return;
     
     isLiveStreaming = true;
-    document.getElementById('live-btn').disabled = true;
-    document.getElementById('pause-btn').disabled = false;
-    document.getElementById('live-btn').innerHTML = '<i class="fas fa-circle"></i> Live';
+    updateLiveStreamControls();
     
-    // Generate new log every 3 seconds
+    liveStreamFirstTimer = setTimeout(() => {
+        addNewLiveLog();
+    }, LIVE_STREAM_FIRST_DELAY_MS);
+
     liveStreamInterval = setInterval(() => {
         addNewLiveLog();
-    }, 3000);
-    addNewLiveLog();
+    }, LIVE_STREAM_INTERVAL_MS);
+
+    showNotification('Live stream started. First event will appear in a moment.', 'info', {
+        title: 'Live Stream'
+    });
 }
 
 function pauseLiveStream() {
     if (!isLiveStreaming) return;
     
     isLiveStreaming = false;
+    stopLiveStreamTimers();
+    pendingLiveLogs = [];
+    updateLiveStreamControls();
+
+    showNotification('Live stream paused.', 'info', {
+        title: 'Live Stream'
+    });
+}
+
+function updateLiveStreamControls() {
+    const liveBtn = document.getElementById('live-btn');
+    const pauseBtn = document.getElementById('pause-btn');
+
+    if (liveBtn) {
+        liveBtn.disabled = isLiveStreaming;
+        liveBtn.innerHTML = isLiveStreaming
+            ? '<i class="fas fa-circle"></i> Live'
+            : '<i class="fas fa-play"></i> Start Live Stream';
+    }
+
+    if (pauseBtn) {
+        pauseBtn.disabled = !isLiveStreaming;
+    }
+}
+
+function stopLiveStreamTimers() {
     clearInterval(liveStreamInterval);
-    document.getElementById('live-btn').disabled = false;
-    document.getElementById('pause-btn').disabled = true;
-    document.getElementById('live-btn').innerHTML = '<i class="fas fa-play"></i> Start Live Stream';
+    clearTimeout(liveStreamFirstTimer);
+    clearTimeout(liveRenderTimer);
+    liveStreamInterval = null;
+    liveStreamFirstTimer = null;
+    liveRenderTimer = null;
 }
 
 function addNewLiveLog() {
+    if (!isLiveStreaming) return;
+
     const attackTypes = ['XSS', 'SQL Injection', 'Port Scan', 'Brute Force', 'DDoS'];
     const severities = ['critical', 'high', 'medium', 'low'];
     const attackType = attackTypes[Math.floor(Math.random() * attackTypes.length)];
@@ -513,19 +572,35 @@ function addNewLiveLog() {
         protocol: 'TCP'
     };
     
-    // Add to beginning of arrays
-    allLogs.unshift(newLog);
+    pendingLiveLogs.unshift(newLog);
+    scheduleLiveLogFlush();
+}
+
+function scheduleLiveLogFlush() {
+    clearTimeout(liveRenderTimer);
+    liveRenderTimer = setTimeout(flushLiveLogs, LIVE_RENDER_DEBOUNCE_MS);
+}
+
+function flushLiveLogs() {
+    if (!isLiveStreaming || pendingLiveLogs.length === 0) return;
+
+    const newLogs = pendingLiveLogs.splice(0);
+    allLogs = mergeLogs(newLogs, allLogs);
     saveStoredLogs();
     syncFilteredLogs();
     
-    // Update stats
     updateLogStats();
 
-    const notificationType = ['critical', 'high'].includes(newLog.severity) ? 'error' : 'warning';
-    showNotification(`${newLog.severity.toUpperCase()} ${newLog.attackType} from ${newLog.sourceIP}`, notificationType, {
-        title: newLog.isBlocked ? 'Attack Detected and Blocked' : 'Active Attack Detected',
-        meta: `${newLog.targetSystem} | ${newLog.protocol}/${newLog.port} | ${newLog.country}`
-    });
+    const notableLog = newLogs.find(log => ['critical', 'high'].includes(log.severity)) || newLogs[0];
+    const now = Date.now();
+    if (notableLog && now - lastLiveNotificationAt > LIVE_NOTIFICATION_MIN_GAP_MS) {
+        lastLiveNotificationAt = now;
+        const notificationType = ['critical', 'high'].includes(notableLog.severity) ? 'error' : 'warning';
+        showNotification(`${notableLog.severity.toUpperCase()} ${notableLog.attackType} from ${notableLog.sourceIP}`, notificationType, {
+            title: notableLog.isBlocked ? 'Attack Detected and Blocked' : 'Active Attack Detected',
+            meta: `${notableLog.targetSystem} | ${notableLog.protocol}/${notableLog.port} | ${notableLog.country}`
+        });
+    }
 }
 
 function buildLiveDescription(attackType, targetSystem) {
@@ -1069,6 +1144,11 @@ function exportSingleLog(logId) {
 
 // Clear Logs
 function clearLogs() {
+    if (!canManageLogs()) {
+        showNotification('Only admins can clear logs.', 'error');
+        return;
+    }
+
     if (confirm('Are you sure you want to clear all logs? This action cannot be undone.')) {
         allLogs = [];
         filteredLogs = [];
@@ -1084,6 +1164,11 @@ function clearLogs() {
 
 // Delete Selected Logs
 function deleteSelectedLogs() {
+    if (!canManageLogs()) {
+        showNotification('Only admins can delete logs.', 'error');
+        return;
+    }
+
     if (selectedLogs.size === 0) {
         alert('No logs selected for deletion');
         return;

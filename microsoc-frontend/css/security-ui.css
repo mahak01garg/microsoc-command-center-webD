@@ -1063,7 +1063,7 @@ body[data-theme="light"] {
     background:
         radial-gradient(circle at 14% 8%, rgba(14, 116, 144, 0.12), transparent 25rem),
         radial-gradient(circle at 88% 16%, rgba(220, 53, 69, 0.08), transparent 24rem),
-        linear-gradient(135deg, #f4f8fb 0%, #e9f0f5 48%, #f8fafc 100%);
+        linear-gradient(135deg, #ffffff 0%, #f6fdff 48%, #fff8f8 100%);
     color: #17202a;
 }
 
@@ -1081,7 +1081,7 @@ body[data-theme="light"]::after {
 
 body[data-theme="light"] .sidebar {
     background:
-        linear-gradient(180deg, #f8fbfd, #e8eef3),
+        linear-gradient(180deg, #ffffff, #f7fdff),
         var(--sidebar-bg);
     border-right-color: rgba(14, 116, 144, 0.2);
     box-shadow: 8px 0 28px rgba(31, 41, 55, 0.1);
@@ -1103,11 +1103,11 @@ body[data-theme="light"] .user-details h3 {
 }
 
 body[data-theme="light"] .sidebar .user-details p {
-    color: #475569 !important;
+    color: #164e63 !important;
 }
 
 body[data-theme="light"] .sidebar-nav a {
-    color: #334155;
+    color: #0f3f4a;
 }
 
 body[data-theme="light"] .sidebar-nav a i {
@@ -1139,7 +1139,7 @@ body[data-theme="light"] .notification {
 }
 
 body[data-theme="light"] .notification-dropdown {
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(241, 245, 249, 0.99));
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(247, 253, 255, 0.99));
     border-color: rgba(14, 116, 144, 0.2);
     box-shadow: 0 24px 50px rgba(31, 41, 55, 0.18);
 }
@@ -1171,7 +1171,7 @@ body[data-theme="light"] .notification-dropdown-item {
 }
 
 body[data-theme="light"] .notification-dropdown-message {
-    color: #475569;
+    color: #164e63;
 }
 
 body[data-theme="light"] .notification-dropdown-time {
@@ -1189,11 +1189,59 @@ body[data-theme="light"] .threat-ribbon span:first-child {
     border-color: rgba(220, 53, 69, 0.22);
 }
 
+body[data-theme="light"] .role-dashboard-strip {
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(255, 245, 246, 0.94)),
+        linear-gradient(90deg, rgba(220, 53, 69, 0.1), rgba(14, 116, 144, 0.06));
+    border-color: rgba(220, 53, 69, 0.2);
+    box-shadow: 0 14px 30px rgba(31, 41, 55, 0.08);
+    color: #0f172a;
+}
+
+body[data-theme="light"] .role-dashboard-strip.admin {
+    border-left: 4px solid var(--primary-color, #dc3545);
+}
+
+body[data-theme="light"] .role-dashboard-strip.analyst {
+    border-left: 4px solid var(--info-color, #17a2b8);
+}
+
+body[data-theme="light"] .role-dashboard-strip strong {
+    color: #9f1239;
+}
+
+body[data-theme="light"] .role-dashboard-strip span {
+    color: #164e63;
+}
+
+body[data-theme="light"] .role-actions span {
+    background: rgba(255, 255, 255, 0.72);
+    border-color: rgba(220, 53, 69, 0.18);
+    color: #0f172a;
+}
+
+body[data-theme="light"] .feature-panel {
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.99), rgba(247, 253, 255, 0.96)),
+        linear-gradient(90deg, rgba(14, 116, 144, 0.08), rgba(220, 53, 69, 0.05));
+    border-color: rgba(14, 116, 144, 0.18);
+    box-shadow: 0 14px 30px rgba(31, 41, 55, 0.08);
+    color: #0f172a;
+}
+
+body[data-theme="light"] .feature-panel h2 {
+    color: #0f172a;
+}
+
+body[data-theme="light"] .feature-panel p {
+    color: #164e63;
+}
+
 body[data-theme="light"] .card,
 body[data-theme="light"] .stat-card,
 body[data-theme="light"] .login-card,
 body[data-theme="light"] .modal-content {
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(245, 248, 251, 0.94));
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 254, 255, 0.96));
     border-color: rgba(14, 116, 144, 0.16);
     box-shadow: 0 16px 34px rgba(31, 41, 55, 0.1);
 }
@@ -1201,7 +1249,7 @@ body[data-theme="light"] .modal-content {
 body[data-theme="light"] .modal {
     background:
         radial-gradient(circle at 50% 28%, rgba(14, 116, 144, 0.12), transparent 26rem),
-        rgba(226, 232, 240, 0.72);
+        rgba(255, 255, 255, 0.78);
 }
 
 body[data-theme="light"] .modal-header,
@@ -1226,7 +1274,7 @@ body[data-theme="light"] .stat-card::before {
 }
 
 body[data-theme="light"] .card-header {
-    background: rgba(236, 243, 248, 0.92);
+    background: rgba(250, 254, 255, 0.94);
     border-bottom-color: rgba(14, 116, 144, 0.14);
 }
 
@@ -1262,7 +1310,7 @@ body[data-theme="light"] .attack-map,
 body[data-theme="light"] .map-container {
     background:
         radial-gradient(circle at center, rgba(14, 116, 144, 0.13), transparent 44%),
-        linear-gradient(135deg, #e8f1f7, #f7fbff 58%, #fff1f2);
+        linear-gradient(135deg, #f7fdff, #ffffff 58%, #fff6f7);
     border-color: rgba(14, 116, 144, 0.18);
 }
 
@@ -1277,8 +1325,8 @@ body[data-theme="light"] .data-table tr:hover {
 }
 
 body[data-theme="light"] .data-table th {
-    background: rgba(232, 240, 246, 0.94);
-    color: #475569;
+    background: rgba(250, 254, 255, 0.96);
+    color: #164e63;
     border-bottom-color: rgba(14, 116, 144, 0.16);
 }
 
@@ -1304,16 +1352,16 @@ body[data-theme="light"] .login-page {
     background:
         radial-gradient(circle at 48% 18%, rgba(14, 116, 144, 0.16), transparent 22rem),
         radial-gradient(circle at 78% 72%, rgba(220, 53, 69, 0.1), transparent 18rem),
-        linear-gradient(135deg, #eef6fa, #f8fafc 55%, #e8eef4);
+        linear-gradient(135deg, #ffffff, #f7fdff 55%, #fff8f4);
 }
 
 body[data-theme="light"] .demo-credentials {
     background: rgba(14, 116, 144, 0.06);
-    color: #475569;
+    color: #164e63;
 }
 
 body[data-theme="light"] ::-webkit-scrollbar-track {
-    background: rgba(226, 232, 240, 0.9);
+    background: rgba(255, 255, 255, 0.94);
 }
 
 /* Light theme auth contrast fixes */
@@ -1325,7 +1373,7 @@ body[data-theme="light"] .login-page {
         radial-gradient(circle at 20% 10%, rgba(6, 182, 212, 0.18), transparent 24rem),
         radial-gradient(circle at 82% 72%, rgba(239, 68, 68, 0.13), transparent 20rem),
         radial-gradient(circle at 62% 34%, rgba(249, 115, 22, 0.1), transparent 18rem),
-        linear-gradient(135deg, #f8fbff, #e8f3f8 52%, #fdf7f2);
+        linear-gradient(135deg, #ffffff, #f6fdff 52%, #fff8f2);
     background-size: 38px 38px, 38px 38px, auto, auto, auto, auto;
     color: #0f172a;
 }
@@ -1378,7 +1426,7 @@ body[data-theme="light"] .login-header .logo i {
 body[data-theme="light"] .login-header .subtitle,
 body[data-theme="light"] .login-form .form-footer,
 body[data-theme="light"] .login-footer {
-    color: #334155;
+    color: #0f3f4a;
 }
 
 body[data-theme="light"] .login-form label {
@@ -1396,7 +1444,7 @@ body[data-theme="light"] .login-form select {
 }
 
 body[data-theme="light"] .login-form input::placeholder {
-    color: #64748b;
+    color: #0e7490;
     opacity: 1;
 }
 
@@ -2063,20 +2111,48 @@ body[data-theme="light"] .custom-notification .toast-copy small {
 }
 
 .trend-bars {
-    display: flex;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(34px, 1fr);
     align-items: end;
     gap: 8px;
     min-height: 280px;
     padding: 18px;
     border-radius: 8px;
     background: rgba(2, 6, 23, 0.42);
+    overflow-x: auto;
 }
 
-.trend-bars span {
-    flex: 1;
+.trend-bar-item {
+    display: grid;
+    grid-template-rows: 1fr auto auto;
+    align-items: end;
+    justify-items: center;
+    min-height: 238px;
+    min-width: 34px;
+    gap: 5px;
+}
+
+.trend-bar-item span {
+    width: 100%;
     min-width: 10px;
     border-radius: 5px 5px 0 0;
     background: linear-gradient(180deg, #67e8f9, #f97316);
+    box-shadow: 0 0 18px rgba(103, 232, 249, 0.16);
+}
+
+.trend-bar-item strong {
+    color: var(--text-primary, #e5eefb);
+    font-size: 12px;
+    line-height: 1;
+}
+
+.trend-bar-item small {
+    color: var(--text-secondary, #94a3b8);
+    font-family: 'Roboto Mono', monospace;
+    font-size: 10px;
+    line-height: 1;
+    white-space: nowrap;
 }
 
 .intel-result {
@@ -2089,6 +2165,78 @@ body[data-theme="light"] .custom-notification .toast-copy small {
     color: #dbeafe;
     font-size: 12px;
     white-space: pre-wrap;
+}
+
+body[data-theme="light"] .feature-panel,
+html[data-theme="light"] .feature-panel {
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.99), rgba(247, 253, 255, 0.96)),
+        linear-gradient(90deg, rgba(14, 116, 144, 0.08), rgba(220, 53, 69, 0.05));
+    border-color: rgba(14, 116, 144, 0.18);
+    box-shadow: 0 14px 30px rgba(31, 41, 55, 0.08);
+    color: #0f172a;
+}
+
+body[data-theme="light"] .feature-panel h2,
+html[data-theme="light"] .feature-panel h2 {
+    color: #0f172a;
+}
+
+body[data-theme="light"] .feature-panel p,
+body[data-theme="light"] .feed-status,
+body[data-theme="light"] .empty-state,
+html[data-theme="light"] .feature-panel p,
+html[data-theme="light"] .feed-status,
+html[data-theme="light"] .empty-state {
+    color: #164e63;
+}
+
+body[data-theme="light"] .live-log-row,
+body[data-theme="light"] .incident-ticket,
+body[data-theme="light"] .trend-bars,
+html[data-theme="light"] .live-log-row,
+html[data-theme="light"] .incident-ticket,
+html[data-theme="light"] .trend-bars {
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: inset 0 0 0 1px rgba(14, 116, 144, 0.08);
+    color: #0f172a;
+}
+
+body[data-theme="light"] .incident-quick-form input,
+body[data-theme="light"] .incident-quick-form select,
+body[data-theme="light"] .intel-tools input,
+body[data-theme="light"] .intel-tools button,
+body[data-theme="light"] .ticket-actions button,
+html[data-theme="light"] .incident-quick-form input,
+html[data-theme="light"] .incident-quick-form select,
+html[data-theme="light"] .intel-tools input,
+html[data-theme="light"] .intel-tools button,
+html[data-theme="light"] .ticket-actions button {
+    background: rgba(255, 255, 255, 0.96);
+    border-color: rgba(14, 116, 144, 0.24);
+    color: #0f172a;
+}
+
+body[data-theme="light"] .attack-map,
+html[data-theme="light"] .attack-map {
+    background:
+        linear-gradient(90deg, rgba(14, 116, 144, 0.08) 1px, transparent 1px),
+        linear-gradient(rgba(14, 116, 144, 0.08) 1px, transparent 1px),
+        radial-gradient(circle at 30% 40%, rgba(6, 182, 212, 0.14), transparent 24%),
+        radial-gradient(circle at 72% 45%, rgba(249, 115, 22, 0.12), transparent 22%),
+        linear-gradient(135deg, #f7fdff, #ffffff 58%, #fff6f7);
+}
+
+body[data-theme="light"] .live-log-row code,
+html[data-theme="light"] .live-log-row code {
+    color: #0e7490;
+}
+
+body[data-theme="light"] .intel-result,
+html[data-theme="light"] .intel-result {
+    background: rgba(255, 255, 255, 0.94);
+    border: 1px solid rgba(14, 116, 144, 0.18);
+    color: #0f172a;
 }
 
 .empty-state {

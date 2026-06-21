@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const { protect } = require('../middleware/auth');
 
 // @route   POST /api/auth/register
 // @desc    Register user
@@ -34,8 +35,8 @@ router.get('/reject/:token', authController.rejectUser);
 
 // @route   GET /api/auth/me
 // @desc    Get current logged in user
-// @access  Private (will add middleware later)
-router.get('/me', authController.getMe);
+// @access  Private
+router.get('/me', protect, authController.getMe);
 
 // @route   GET /api/auth/demo
 // @desc    Get demo credentials

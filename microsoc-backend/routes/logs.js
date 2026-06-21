@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../middleware/auth');
+const { protect, authorizeRoles } = require('../middleware/auth');
 const logController = require('../controllers/logController');
 
 // All routes require authentication
@@ -38,8 +38,8 @@ router.put('/:id', logController.updateLog);
 
 // @route   DELETE /api/logs/:id
 // @desc    Delete log
-// @access  Private
-router.delete('/:id', logController.deleteLog);
+// @access  Admin
+router.delete('/:id', authorizeRoles('admin'), logController.deleteLog);
 
 // @route   POST /api/logs/bulk
 // @desc    Create multiple logs
@@ -48,8 +48,8 @@ router.post('/bulk', logController.createBulkLogs);
 
 // @route   DELETE /api/logs
 // @desc    Delete multiple logs
-// @access  Private
-router.delete('/', logController.deleteMultipleLogs);
+// @access  Admin
+router.delete('/', authorizeRoles('admin'), logController.deleteMultipleLogs);
 
 // @route   POST /api/logs/generate-mock
 // @desc    Generate mock logs
