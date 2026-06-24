@@ -34,6 +34,32 @@ const USER_ROLES = {
     ANALYST: 'analyst'
 };
 
+const ASSET_VERSION = '20260623t';
+
+const ROLE_NAVIGATION = {
+    admin: [
+        { key: 'dashboard', label: 'Dashboard', icon: 'fa-tachometer-alt', href: 'dashboard.html' },
+        { key: 'logs', label: 'Security Logs', icon: 'fa-stream', href: 'logs.html', badge: { id: 'log-count', className: 'badge-warning' } },
+        { key: 'alerts', label: 'Alerts', icon: 'fa-bell', href: 'alerts.html', badge: { id: 'notification-count', className: 'badge-danger' } },
+        { key: 'incidents', label: 'Incidents', icon: 'fa-exclamation-triangle', href: 'incidents.html', badge: { id: 'incident-count', className: 'badge-danger' } },
+        { key: 'analytics', label: 'Analytics', icon: 'fa-chart-line', href: 'analytics.html' },
+        { key: 'user-management', label: 'User Management', icon: 'fa-users-cog', href: '#/user-management' },
+        { key: 'audit-logs', label: 'Audit Logs', icon: 'fa-clipboard-list', href: '#/audit-logs' },
+        { key: 'settings', label: 'Settings', icon: 'fa-cogs', href: '#/settings' }
+    ],
+    analyst: [
+        { key: 'dashboard', label: 'Dashboard', icon: 'fa-tachometer-alt', href: 'dashboard.html' },
+        { key: 'logs', label: 'Security Logs', icon: 'fa-stream', href: 'logs.html', badge: { id: 'log-count', className: 'badge-warning' } },
+        { key: 'alerts', label: 'Alerts', icon: 'fa-bell', href: 'alerts.html', badge: { id: 'notification-count', className: 'badge-danger' } },
+        { key: 'incidents', label: 'Incidents', icon: 'fa-exclamation-triangle', href: 'incidents.html', badge: { id: 'incident-count', className: 'badge-danger' } },
+        { key: 'analytics', label: 'Analytics', icon: 'fa-chart-line', href: 'analytics.html' }
+    ]
+};
+
+let sidebarRepairTimer = null;
+const sidebarObservers = new WeakMap();
+let pageIntegrityObserver = null;
+
 // ============================================================================
 // CORE APPLICATION FUNCTIONS
 // ============================================================================
@@ -70,7 +96,7 @@ function loadTheme() {
     const themeStyle = document.getElementById('theme-style');
     
     if (themeStyle) {
-        themeStyle.setAttribute('href', `css/${savedTheme}-theme.css`);
+        themeStyle.setAttribute('href', `css/${savedTheme}-theme.css?v=${ASSET_VERSION}`);
         document.body.dataset.theme = savedTheme;
         
         // Update theme toggle icon if exists
@@ -88,11 +114,128 @@ function updateThemeIcon(currentTheme) {
     }
 }
 
+function getCurrentUserRole() {
+    try {
+        return String(getUser()?.role || USER_ROLES.ANALYST).trim().toLowerCase();
+    } catch (error) {
+        return USER_ROLES.ANALYST;
+    }
+}
+
+function isAdminUser() {
+    return getCurrentUserRole() === USER_ROLES.ADMIN;
+}
+
+function showFeatureUnavailable(featureName) {
+    const message = `${featureName} is available for admins only.`;
+    if (typeof window.showNotification === 'function') {
+        window.showNotification(message, 'warning');
+        return;
+    }
+    window.alert(message);
+}
+
+function renderSidebarNavigation() {
+    const sidebarNav = document.querySelector('.sidebar-nav ul');
+    if (!sidebarNav) return;
+
+    const role = getCurrentUserRole();
+    const items = ROLE_NAVIGATION[role] || ROLE_NAVIGATION.analyst;
+    const currentPage = (window.location.pathname.split('/').pop() || '').replace(/\.html$/, '');
+    const currentHash = window.location.hash.replace(/^#\/?/, '').split('?')[0];
+
+    sidebarNav.innerHTML = items.map(item => {
+        const itemRoute = item.href.startsWith('#/')
+            ? item.href.replace(/^#\//, '').split('?')[0]
+            : item.href.split('#')[0].replace('.html', '');
+        const isActive = itemRoute === currentPage || itemRoute === currentHash;
+        const badge = item.badge
+            ? `<span class="badge ${item.badge.className}" id="${item.badge.id}">0</span>`
+            : '';
+
+        return `
+            <li class="${isActive ? 'active' : ''}" data-sidebar-key="${item.key}">
+                <a href="${item.href}" ${item.title ? `title="${item.title}"` : ''}>
+                    <i class="fas ${item.icon}"></i>
+                    <span>${item.label}</span>
+                    ${badge}
+                </a>
+            </li>
+        `;
+    }).join('') + `
+        <li>
+            <a href="javascript:void(0)" onclick="toggleTheme(); return false;">
+                <i class="fas fa-moon" id="theme-icon"></i>
+                <span>Theme</span>
+            </a>
+        </li>
+        <li>
+            <a href="#" onclick="logout()">
+                <i class="fas fa-sign-out-alt"></i>
+                <span>Logout</span>
+            </a>
+        </li>
+    `;
+
+    scheduleSidebarRepair();
+
+    sidebarNav.querySelectorAll('[data-admin-feature]').forEach((element) => {
+        element.addEventListener('click', (event) => {
+            event.preventDefault();
+            showFeatureUnavailable(element.querySelector('span')?.textContent || 'This feature');
+        });
+    });
+
+    observeSidebarNavigation();
+}
+
+function scheduleSidebarRepair() {
+    if (sidebarRepairTimer) return;
+    sidebarRepairTimer = setTimeout(() => {
+        sidebarRepairTimer = null;
+        enforceSidebarNavigationIntegrity();
+    }, 0);
+}
+
+function observeSidebarNavigation() {
+    const sidebarNav = document.querySelector('.sidebar-nav ul');
+    if (!sidebarNav || sidebarObservers.has(sidebarNav)) return;
+
+    const observer = new MutationObserver(() => {
+        enforceSidebarNavigationIntegrity();
+    });
+    observer.observe(sidebarNav, { childList: true, subtree: true });
+    sidebarObservers.set(sidebarNav, observer);
+
+    observePageIntegrity();
+}
+
+function enforceSidebarNavigationIntegrity() {
+    const sidebarNav = document.querySelector('.sidebar-nav ul');
+    if (!sidebarNav) return;
+
+    const expectedKeys = (ROLE_NAVIGATION[getCurrentUserRole()] || ROLE_NAVIGATION.analyst).map(item => item.key);
+    const currentKeys = Array.from(sidebarNav.querySelectorAll('li[data-sidebar-key]')).map(item => item.dataset.sidebarKey);
+    const hasExpectedLogs = sidebarNav.querySelector('a[href*="logs.html"]');
+
+    if (!hasExpectedLogs || expectedKeys.join('|') !== currentKeys.join('|')) {
+        renderSidebarNavigation();
+    }
+}
+
+function observePageIntegrity() {
+    if (pageIntegrityObserver) return;
+    pageIntegrityObserver = new MutationObserver(() => {
+        enforceSidebarNavigationIntegrity();
+    });
+    pageIntegrityObserver.observe(document.body, { childList: true, subtree: true });
+}
+
 /**
  * Check if user is authenticated
  */
 function checkAuthentication() {
-    const protectedPages = ['dashboard.html', 'incidents.html', 'logs.html', 'analytics.html'];
+    const protectedPages = ['dashboard.html', 'incidents.html', 'logs.html', 'alerts.html', 'analytics.html'];
     const currentPage = window.location.pathname.split('/').pop();
     
     if (protectedPages.includes(currentPage)) {
@@ -106,6 +249,7 @@ function checkAuthentication() {
         
         // Update UI with user info
         updateUserInfo(user);
+        renderSidebarNavigation();
         return true;
     }
     
@@ -143,10 +287,24 @@ function updateUserInfo(user) {
 }
 
 /**
+ * Ensure Alerts appears in the sidebar across all static pages.
+ */
+function ensureAlertsSidebarLink() {
+    renderSidebarNavigation();
+}
+
+function reorderSidebarNavigation() {
+    renderSidebarNavigation();
+}
+
+/**
  * Initialize current page based on URL
  */
 function initCurrentPage() {
     const currentPage = window.location.pathname.split('/').pop();
+    ensureAlertsSidebarLink();
+    reorderSidebarNavigation();
+    scheduleSidebarRepair();
     
     switch(currentPage) {
         case 'dashboard.html':
@@ -157,6 +315,9 @@ function initCurrentPage() {
             break;
         case 'logs.html':
             if (typeof initLogs === 'function') initLogs();
+            break;
+        case 'alerts.html':
+            if (typeof initAlerts === 'function') initAlerts();
             break;
         case 'analytics.html':
             if (typeof initAnalytics === 'function') initAnalytics();
@@ -285,16 +446,20 @@ function closeSidebar() {
  */
 function toggleTheme() {
     const themeStyle = document.getElementById('theme-style');
+    if (!themeStyle) return;
     const currentTheme = themeStyle.getAttribute('href').includes('dark') ? 'dark' : 'light';
     const newTheme = currentTheme === 'light' ? 'dark' : 'light';
     
     // Update theme
-    themeStyle.setAttribute('href', `css/${newTheme}-theme.css`);
+    themeStyle.setAttribute('href', `css/${newTheme}-theme.css?v=${ASSET_VERSION}`);
     document.body.dataset.theme = newTheme;
     localStorage.setItem('theme', newTheme);
     
     // Update icon
     updateThemeIcon(newTheme);
+    window.dispatchEvent(new CustomEvent('microsoc:theme-changed', {
+        detail: { theme: newTheme }
+    }));
     
     // Show notification
     showNotification(`Switched to ${newTheme} theme`, 'info');
@@ -387,6 +552,7 @@ function formatDateTime(dateString) {
 function logout() {
     // Clear user data
     localStorage.removeItem('user');
+    localStorage.removeItem('token');
     
     // Show logout notification
     showNotification('Logged out successfully', 'info');

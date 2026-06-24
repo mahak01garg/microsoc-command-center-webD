@@ -1,6 +1,8 @@
 const Log = require('../models/Log');
 const User = require('../models/User');
 const realtimeHub = require('../utils/realtimeHub');
+const threatPipeline = require('../utils/threatPipeline');
+const { recordAuditEvent } = require('../utils/auditLogger');
 
 // @desc    Get all logs with filters
 // @route   GET /api/logs
@@ -164,7 +166,14 @@ exports.getLogById = async (req, res) => {
 // @access  Private
 exports.createLog = async (req, res) => {
   try {
-    const logData = req.body;
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can create logs.'
+      });
+    }
+
+    const logData = threatPipeline.validateLogPayload(req.body);
     
     // Set processed by if not specified
     if (!logData.processedBy) {
@@ -174,10 +183,29 @@ exports.createLog = async (req, res) => {
 
     const log = await Log.create(logData);
     realtimeHub.broadcast({ type: 'new-log', log });
+    const job = threatPipeline.queueLogAnalysis(log, {
+      userId: req.user.id,
+      source: 'api'
+    });
+
+    await recordAuditEvent(req, {
+      action: 'Security Log Created',
+      module: 'logs',
+      targetType: 'Log',
+      targetId: String(log._id),
+      targetLabel: `${log.attackType} · ${log.sourceIP}`,
+      details: `Created security log for ${log.attackType}`,
+      metadata: { severity: log.severity, sourceIP: log.sourceIP, targetSystem: log.targetSystem }
+    });
 
     res.status(201).json({
       success: true,
-      log
+      log,
+      jobId: job.id,
+      pipeline: {
+        queued: true,
+        status: job.state
+      }
     });
   } catch (error) {
     console.error('Create log error:', error);
@@ -193,6 +221,13 @@ exports.createLog = async (req, res) => {
 // @access  Private
 exports.updateLog = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can update logs.'
+      });
+    }
+
     const { id } = req.params;
     const updateData = req.body;
 
@@ -208,6 +243,16 @@ exports.updateLog = async (req, res) => {
         message: 'Log not found'
       });
     }
+
+    await recordAuditEvent(req, {
+      action: 'Security Log Updated',
+      module: 'logs',
+      targetType: 'Log',
+      targetId: String(log._id),
+      targetLabel: `${log.attackType} · ${log.sourceIP}`,
+      details: `Updated security log ${log.attackType}`,
+      metadata: { updatedFields: Object.keys(updateData) }
+    });
 
     res.status(200).json({
       success: true,
@@ -227,6 +272,13 @@ exports.updateLog = async (req, res) => {
 // @access  Private
 exports.deleteLog = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can delete logs.'
+      });
+    }
+
     const { id } = req.params;
 
     const log = await Log.findByIdAndDelete(id);
@@ -238,8 +290,19 @@ exports.deleteLog = async (req, res) => {
       });
     }
 
+    await recordAuditEvent(req, {
+      action: 'Security Log Deleted',
+      module: 'logs',
+      targetType: 'Log',
+      targetId: String(id),
+      targetLabel: `${log.attackType} · ${log.sourceIP}`,
+      details: `Deleted security log ${log.attackType}`,
+      metadata: { severity: log.severity, sourceIP: log.sourceIP }
+    });
+
     res.status(200).json({
       success: true,
+      deletedCount: 1,
       message: 'Log deleted successfully'
     });
   } catch (error) {
@@ -256,6 +319,13 @@ exports.deleteLog = async (req, res) => {
 // @access  Private
 exports.createBulkLogs = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can create logs in bulk.'
+      });
+    }
+
     const logsData = req.body;
 
     if (!Array.isArray(logsData)) {
@@ -274,6 +344,19 @@ exports.createBulkLogs = async (req, res) => {
 
     const logs = await Log.insertMany(logsWithUser);
     logs.forEach(log => realtimeHub.broadcast({ type: 'new-log', log }));
+    threatPipeline.queueBatchAnalysis(logs, {
+      userId: req.user.id,
+      source: 'bulk'
+    });
+
+    await recordAuditEvent(req, {
+      action: 'Bulk Logs Created',
+      module: 'logs',
+      targetType: 'Log Batch',
+      targetLabel: `${logs.length} logs`,
+      details: `Created ${logs.length} logs in bulk`,
+      metadata: { count: logs.length }
+    });
 
     res.status(201).json({
       success: true,
@@ -294,6 +377,13 @@ exports.createBulkLogs = async (req, res) => {
 // @access  Private
 exports.deleteMultipleLogs = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can delete logs.'
+      });
+    }
+
     const { ids } = req.body;
 
     if (!Array.isArray(ids) || ids.length === 0) {
@@ -305,8 +395,18 @@ exports.deleteMultipleLogs = async (req, res) => {
 
     const result = await Log.deleteMany({ _id: { $in: ids } });
 
+    await recordAuditEvent(req, {
+      action: 'Bulk Logs Deleted',
+      module: 'logs',
+      targetType: 'Log Batch',
+      targetLabel: `${ids.length} logs`,
+      details: `Deleted ${result.deletedCount} logs`,
+      metadata: { ids }
+    });
+
     res.status(200).json({
       success: true,
+      deletedCount: result.deletedCount,
       message: `${result.deletedCount} logs deleted successfully`
     });
   } catch (error) {
@@ -323,6 +423,13 @@ exports.deleteMultipleLogs = async (req, res) => {
 // @access  Private
 exports.generateMockLogs = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can generate mock logs.'
+      });
+    }
+
     const { count = 10 } = req.body;
 
     if (count > 1000) {
@@ -342,6 +449,19 @@ exports.generateMockLogs = async (req, res) => {
 
     const createdLogs = await Log.insertMany(logs);
     createdLogs.forEach(log => realtimeHub.broadcast({ type: 'new-log', log }));
+    threatPipeline.queueBatchAnalysis(createdLogs, {
+      userId: req.user.id,
+      source: 'mock'
+    });
+
+    await recordAuditEvent(req, {
+      action: 'Mock Logs Generated',
+      module: 'logs',
+      targetType: 'Log Batch',
+      targetLabel: `${createdLogs.length} mock logs`,
+      details: `Generated ${createdLogs.length} mock logs`,
+      metadata: { count: createdLogs.length }
+    });
 
     res.status(201).json({
       success: true,
@@ -362,6 +482,13 @@ exports.generateMockLogs = async (req, res) => {
 // @access  Private
 exports.exportLogs = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can export logs.'
+      });
+    }
+
     const { format = 'json', ...filters } = req.query;
 
     // Build query from filters
@@ -432,6 +559,15 @@ exports.exportLogs = async (req, res) => {
       res.setHeader('Content-Disposition', `attachment; filename=logs-${new Date().toISOString().split('T')[0]}.json`);
       res.send(JSON.stringify(logs, null, 2));
     }
+
+    await recordAuditEvent(req, {
+      action: 'Logs Exported',
+      module: 'logs',
+      targetType: 'Report',
+      targetLabel: 'Security logs export',
+      details: `Exported logs as ${String(format).toUpperCase()}`,
+      metadata: { format, filters }
+    });
   } catch (error) {
     console.error('Export logs error:', error);
     res.status(500).json({

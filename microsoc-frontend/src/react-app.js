@@ -9,14 +9,46 @@
         dashboard: 'dashboard',
         incidents: 'incidents',
         logs: 'logs',
-        analytics: 'analytics'
+        alerts: 'alerts',
+        analytics: 'analytics',
+        'audit-logs': 'audit-logs',
+        'user-management': 'user-management',
+        settings: 'settings'
     };
 
-    const protectedRoutes = new Set(['dashboard', 'incidents', 'logs', 'analytics']);
+    const protectedRoutes = new Set(['dashboard', 'incidents', 'logs', 'alerts', 'analytics', 'audit-logs', 'user-management', 'settings']);
     const loadedExternalScripts = new Set();
     const pages = window.MICROSOC_PAGES || {};
     const LOCAL_API_BASE_URL = 'http://localhost:5001/api';
     const HOSTED_API_BASE_URL = 'https://microsoc-backend.onrender.com/api';
+    const NOTIFICATION_BATCH_WINDOW_MS = 5000;
+    const ROLE_NAVIGATION = {
+        admin: [
+            { key: 'dashboard', label: 'Dashboard', icon: 'fa-tachometer-alt', href: 'dashboard.html' },
+            { key: 'logs', label: 'Security Logs', icon: 'fa-stream', href: 'logs.html', badge: { id: 'log-count', className: 'badge-warning' } },
+            { key: 'alerts', label: 'Alerts', icon: 'fa-bell', href: 'alerts.html', badge: { id: 'notification-count', className: 'badge-danger' } },
+            { key: 'incidents', label: 'Incidents', icon: 'fa-exclamation-triangle', href: 'incidents.html', badge: { id: 'incident-count', className: 'badge-danger' } },
+            { key: 'analytics', label: 'Analytics', icon: 'fa-chart-line', href: 'analytics.html' },
+            { key: 'user-management', label: 'User Management', icon: 'fa-users-cog', href: '#/user-management' },
+            { key: 'audit-logs', label: 'Audit Logs', icon: 'fa-clipboard-list', href: '#/audit-logs' },
+            { key: 'settings', label: 'Settings', icon: 'fa-cogs', href: '#/settings' }
+        ],
+        analyst: [
+            { key: 'dashboard', label: 'Dashboard', icon: 'fa-tachometer-alt', href: 'dashboard.html' },
+            { key: 'logs', label: 'Security Logs', icon: 'fa-stream', href: 'logs.html', badge: { id: 'log-count', className: 'badge-warning' } },
+            { key: 'alerts', label: 'Alerts', icon: 'fa-bell', href: 'alerts.html', badge: { id: 'notification-count', className: 'badge-danger' } },
+            { key: 'incidents', label: 'Incidents', icon: 'fa-exclamation-triangle', href: 'incidents.html', badge: { id: 'incident-count', className: 'badge-danger' } },
+            { key: 'analytics', label: 'Analytics', icon: 'fa-chart-line', href: 'analytics.html' }
+        ]
+    };
+    const notificationBatch = {
+        alerts: [],
+        incidents: [],
+        timer: null
+    };
+    let sidebarRepairTimer = null;
+    const sidebarObservers = new WeakMap();
+    let pageIntegrityObserver = null;
 
     window.MICROSOC_API_BASE_URL = ['localhost', '127.0.0.1'].includes(window.location.hostname)
         ? LOCAL_API_BASE_URL
@@ -34,6 +66,33 @@
 
     window.navigateTo = navigateTo;
 
+    function updateThemeIcon(theme) {
+        const themeIcon = document.querySelector('#theme-icon, .theme-toggle i, [onclick*="toggleTheme"] i');
+        if (themeIcon) {
+            themeIcon.className = theme === 'light' ? 'fas fa-moon' : 'fas fa-sun';
+        }
+    }
+
+    function toggleTheme() {
+        const currentTheme = localStorage.getItem('theme') === 'light' ? 'light' : 'dark';
+        const nextTheme = currentTheme === 'light' ? 'dark' : 'light';
+        const themeStyle = document.getElementById('theme-style');
+
+        if (themeStyle) {
+            themeStyle.setAttribute('href', `css/${nextTheme}-theme.css?v=20260623t`);
+        }
+
+        document.body.dataset.theme = nextTheme;
+        localStorage.setItem('theme', nextTheme);
+        updateThemeIcon(nextTheme);
+        window.dispatchEvent(new CustomEvent('microsoc:theme-changed', {
+            detail: { theme: nextTheme }
+        }));
+        return nextTheme;
+    }
+
+    window.toggleTheme = toggleTheme;
+
     function patchLegacyNavigation(code) {
         return code
             .replace(/https:\/\/microsoc-backend\.onrender\.com\/api/g, window.MICROSOC_API_BASE_URL)
@@ -49,7 +108,9 @@
             .replace(/window\.location\.href\s*=\s*['"]dashboard\.html['"]/g, "window.navigateTo('dashboard')")
             .replace(/window\.location\.href\s*=\s*['"]incidents\.html['"]/g, "window.navigateTo('incidents')")
             .replace(/window\.location\.href\s*=\s*['"]logs\.html['"]/g, "window.navigateTo('logs')")
-            .replace(/window\.location\.href\s*=\s*['"]analytics\.html['"]/g, "window.navigateTo('analytics')");
+            .replace(/window\.location\.href\s*=\s*['"]alerts\.html['"]/g, "window.navigateTo('alerts')")
+            .replace(/window\.location\.href\s*=\s*['"]analytics\.html['"]/g, "window.navigateTo('analytics')")
+            .replace(/window\.location\.href\s*=\s*['"]settings\.html['"]/g, "window.navigateTo('settings')");
     }
 
     function exposePageFunctions(code) {
@@ -109,7 +170,16 @@
             return;
         }
 
+        if (route !== 'audit-logs') {
+            installRouteTabs(mainContent, route);
+        }
+        ensureAlertsSidebarLink(route);
+        reorderSidebarNavigation();
+        renderSidebarNavigation(document.getElementById('legacy-page') || document);
+        scheduleSidebarRepair(document.getElementById('legacy-page') || document);
         installAIAssistant(route);
+        syncUserManagementPanel(route);
+        if (route === 'audit-logs') return;
         if (document.querySelector('.threat-ribbon')) return;
 
         const ribbon = document.createElement('div');
@@ -130,6 +200,143 @@
             tag.textContent = `SEC-${String(index + 1).padStart(2, '0')}`;
             card.appendChild(tag);
         });
+    }
+
+    function installRouteTabs(mainContent, route) {
+        if (!mainContent || document.querySelector('.soc-route-tabs')) return;
+
+        const tabs = document.createElement('div');
+        tabs.className = 'soc-route-tabs';
+        const role = currentUser().role || 'analyst';
+        const links = [
+            ['dashboard', 'Dashboard'],
+            ['logs', 'Security Logs'],
+            ['alerts', 'Alerts'],
+            ['incidents', 'Incidents'],
+            ['analytics', 'Analytics']
+        ];
+        if (role === 'admin') {
+            links.push(
+                ['user-management', 'User Management'],
+                ['audit-logs', 'Audit Logs'],
+                ['settings', 'Settings']
+            );
+        }
+
+        tabs.innerHTML = links.map(([tabRoute, label]) => `
+            <button type="button" class="soc-route-tab ${route === tabRoute ? 'active' : ''}" data-route="${tabRoute}">
+                ${label}
+            </button>
+        `).join('');
+
+        tabs.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-route]');
+            if (!button) return;
+            navigateTo(button.dataset.route);
+        });
+
+        mainContent.insertBefore(tabs, mainContent.firstChild);
+    }
+
+    function ensureAlertsSidebarLink(route) {
+        const sidebarNav = document.querySelector('.sidebar-nav ul');
+        if (!sidebarNav || sidebarNav.querySelector('[data-sidebar-route="alerts"]')) return;
+
+        const item = document.createElement('li');
+        item.dataset.sidebarRoute = 'alerts';
+        if (route === 'alerts') item.classList.add('active');
+        item.innerHTML = `
+            <a href="#/alerts">
+                <i class="fas fa-bell"></i>
+                <span>Alerts</span>
+            </a>
+        `;
+
+        const analyticsItem = sidebarNav.querySelector('a[href="analytics.html"]')?.closest('li');
+        if (analyticsItem) {
+            sidebarNav.insertBefore(item, analyticsItem);
+        } else {
+            sidebarNav.appendChild(item);
+        }
+    }
+
+    function flushNotificationBatch() {
+        const alerts = notificationBatch.alerts.splice(0);
+        const incidents = notificationBatch.incidents.splice(0);
+
+        if (alerts.length && typeof window.showNotification === 'function') {
+            const criticalCount = alerts.filter((item) => String(item.severity).toLowerCase() === 'critical').length;
+            const highCount = alerts.filter((item) => String(item.severity).toLowerCase() === 'high').length;
+            const message = alerts.length === 1
+                ? (alerts[0].message || alerts[0].title || 'Security alert detected')
+                : `${alerts.length} alerts detected${criticalCount ? `, ${criticalCount} critical` : ''}${highCount ? `, ${highCount} high` : ''}`;
+            window.showNotification(message, criticalCount ? 'error' : 'warning', {
+                title: alerts.length === 1 ? (alerts[0].title || 'Threat Alert') : 'Alert Burst'
+            });
+        }
+
+        if (incidents.length && typeof window.showNotification === 'function') {
+            const criticalCount = incidents.filter((item) => String(item.severity).toLowerCase() === 'critical').length;
+            const message = incidents.length === 1
+                ? (incidents[0].title || 'Incident created')
+                : `${incidents.length} incidents updated${criticalCount ? `, ${criticalCount} critical` : ''}`;
+            window.showNotification(message, criticalCount ? 'error' : 'warning', {
+                title: incidents.length === 1 ? 'Incident Created' : 'Incident Burst'
+            });
+        }
+
+        notificationBatch.timer = null;
+    }
+
+    function queueNotificationBatch(kind, payload) {
+        notificationBatch[kind].push(payload);
+        clearTimeout(notificationBatch.timer);
+        notificationBatch.timer = setTimeout(flushNotificationBatch, NOTIFICATION_BATCH_WINDOW_MS);
+    }
+
+    function reorderSidebarNavigation() {
+        const sidebarNav = document.querySelector('.sidebar-nav ul');
+        if (!sidebarNav) return;
+
+        const role = getCurrentUserRole();
+        const desiredOrder = role === 'admin'
+            ? ['dashboard', 'logs', 'alerts', 'incidents', 'analytics', 'audit-logs', 'user-management', 'settings']
+            : ['dashboard', 'logs', 'alerts', 'incidents', 'analytics'];
+        const items = Array.from(sidebarNav.querySelectorAll('li'));
+        const mapped = new Map();
+
+        items.forEach((item) => {
+            const href = item.querySelector('a')?.getAttribute('href') || '';
+            const key = href.includes('dashboard')
+                ? 'dashboard'
+                : href.includes('logs')
+                    ? 'logs'
+                    : href.includes('alerts')
+                        ? 'alerts'
+                        : href.includes('incidents')
+                            ? 'incidents'
+                            : href.includes('analytics')
+                                ? 'analytics'
+                                : href.includes('audit-logs')
+                                    ? 'audit-logs'
+                                : href.includes('user-management')
+                                    ? 'user-management'
+                                : href.includes('theme') || href === '#'
+                                    ? 'theme'
+                                    : href.includes('logout')
+                                        ? 'logout'
+                                        : null;
+            if (key) mapped.set(key, item);
+        });
+
+        const themeItem = items.find((item) => item.querySelector('a[onclick*="toggleTheme"]'));
+        const logoutItem = items.find((item) => item.querySelector('a[onclick*="logout"]'));
+        const nextItems = desiredOrder.map((key) => mapped.get(key)).filter(Boolean);
+
+        sidebarNav.innerHTML = '';
+        nextItems.forEach((item) => sidebarNav.appendChild(item));
+        if (themeItem) sidebarNav.appendChild(themeItem);
+        if (logoutItem) sidebarNav.appendChild(logoutItem);
     }
 
     function installAIAssistant(route) {
@@ -294,11 +501,507 @@
         if (profileName) profileName.textContent = user.name || 'User';
         if (profileRole) profileRole.textContent = `Role: ${displayRole}`;
         if (profileEmail) profileEmail.textContent = `Email: ${user.email || 'Not available'}`;
+        renderSidebarNavigation(root);
+        scheduleSidebarRepair(root);
+    }
+
+    function getCurrentUserRole() {
+        return String(currentUser().role || 'analyst').trim().toLowerCase();
+    }
+
+    function showFeatureUnavailable(featureName) {
+        const message = `${featureName} is coming soon.`;
+        if (typeof window.showNotification === 'function') {
+            window.showNotification(message, 'warning');
+        } else {
+            window.alert(message);
+        }
+    }
+
+    function buildProtectedShell(title, activeRoute) {
+        const active = (routeKey) => routeKey === activeRoute ? 'active' : '';
+        const role = getCurrentUserRole();
+        const items = ROLE_NAVIGATION[role] || ROLE_NAVIGATION.analyst;
+        const navItems = items.map((item) => {
+            const badge = item.badge
+                ? `<span class="badge ${item.badge.className}" id="${item.badge.id}">0</span>`
+                : '';
+            const adminFeatureAttr = item.key === 'audit-logs' || item.key === 'user-management' || item.key === 'settings'
+                ? ` data-admin-feature="${item.key}"`
+                : '';
+            return `<li class="${active(item.key)}"><a href="${item.href}"${adminFeatureAttr}><i class="fas ${item.icon}"></i><span>${item.label}</span>${badge}</a></li>`;
+        }).join('');
+        return {
+            title,
+            bodyClass: '',
+            body: `
+                <div class="sidebar" id="sidebar">
+                    <div class="sidebar-header">
+                        <div class="logo">
+                            <i class="fas fa-shield-alt"></i>
+                            <h2>MicroSOC</h2>
+                        </div>
+                        <button class="sidebar-toggle" onclick="toggleSidebar()">
+                            <i class="fas fa-bars"></i>
+                        </button>
+                    </div>
+                    <div class="user-info">
+                        <div class="avatar">
+                            <i class="fas fa-user-secret"></i>
+                        </div>
+                        <div class="user-details">
+                            <h3 id="user-name">Loading...</h3>
+                            <p id="user-role">Loading...</p>
+                            <p id="user-email" style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">Loading...</p>
+                        </div>
+                    </div>
+                    <nav class="sidebar-nav">
+                        <ul>
+                            ${navItems}
+                            <li><a href="javascript:void(0)" onclick="toggleTheme(); return false;"><i class="fas fa-moon" id="theme-icon"></i><span>Theme</span></a></li>
+                            <li><a href="#" onclick="logout()"><i class="fas fa-sign-out-alt"></i><span>Logout</span></a></li>
+                        </ul>
+                    </nav>
+                </div>
+                <div class="main-content" id="main-content">
+                    <header class="main-header">
+                        <div class="header-left">
+                            <h1><i class="fas fa-clipboard-list"></i> Audit Logs</h1>
+                            <p class="subtitle">User actions and system accountability</p>
+                        </div>
+                    </header>
+                </div>
+            `
+        };
+    }
+
+    function syncUserManagementPanel(route) {
+        const panel = document.getElementById('user-management-panel');
+        if (route === 'user-management') {
+            if (!panel) {
+                openUserManagementModal().catch((error) => {
+                    console.error('Failed to open User Management panel:', error);
+                });
+            }
+            return;
+        }
+
+        if (panel) {
+            closeUserManagementModal();
+        } else {
+            restoreMainContentView();
+        }
+    }
+
+    function setExclusiveMainContentView(panel) {
+        const mainContent = document.querySelector('.main-content');
+        if (!mainContent) return;
+        document.body.classList.add('user-management-open');
+
+        Array.from(mainContent.children).forEach((child) => {
+            if (child === panel) return;
+            if (!child.dataset.userManagementHidden) {
+                child.dataset.userManagementHidden = 'true';
+                child.hidden = true;
+            }
+        });
+    }
+
+    function restoreMainContentView() {
+        const mainContent = document.querySelector('.main-content');
+        if (!mainContent) return;
+        document.body.classList.remove('user-management-open');
+
+        Array.from(mainContent.children).forEach((child) => {
+            if (child.dataset.userManagementHidden !== 'true') return;
+            child.hidden = false;
+            delete child.dataset.userManagementHidden;
+        });
+    }
+
+    function ensureUserManagementModal() {
+        let panel = document.getElementById('user-management-panel');
+        if (panel) return panel;
+
+        const host = findContentHost(document.querySelector('.legacy-page-root') || document);
+        if (!host) return null;
+        const role = currentUser().role || 'analyst';
+
+        panel = document.createElement('section');
+        panel.id = 'user-management-panel';
+        panel.className = 'feature-panel feature-user-management';
+        panel.innerHTML = `
+            <div class="threat-ribbon">
+                <span><i class="fas fa-shield-virus"></i> Threat Level: Elevated</span>
+                <span><i class="fas fa-satellite-dish"></i> Sensors: Online</span>
+                <span><i class="fas fa-fingerprint"></i> Identity Guard: Active</span>
+                <span><i class="fas fa-bolt"></i> USER MANAGEMENT Console</span>
+            </div>
+            <div class="role-dashboard-strip ${role}">
+                <div>
+                    <strong>${role === 'admin' ? 'Admin Command View' : 'Analyst Triage View'}</strong>
+                    <span>${role === 'admin' ? 'User approvals, access control, and policy management are enabled.' : 'Focused view for user visibility and limited access operations.'}</span>
+                </div>
+                <div class="role-actions">
+                    <span><i class="fas fa-user-shield"></i> ${role.toUpperCase()}</span>
+                    <span><i class="fas fa-users-cog"></i> User Controls</span>
+                    ${role === 'admin' ? '<span><i class="fas fa-lock-open"></i> Admin controls enabled</span>' : '<span><i class="fas fa-lock"></i> Admin controls hidden</span>'}
+                </div>
+            </div>
+            <div class="soc-route-tabs">
+                <button type="button" class="soc-route-tab" data-route="dashboard">Dashboard</button>
+                <button type="button" class="soc-route-tab" data-route="logs">Security Logs</button>
+                <button type="button" class="soc-route-tab" data-route="alerts">Alerts</button>
+                <button type="button" class="soc-route-tab" data-route="incidents">Incidents</button>
+                <button type="button" class="soc-route-tab" data-route="analytics">Analytics</button>
+                <button type="button" class="soc-route-tab active" data-route="user-management">User Management</button>
+            </div>
+            <div class="feature-panel-header">
+                <div>
+                    <h2 style="font-size:26px;font-weight:900;line-height:1.1;"><i class="fas fa-users-cog"></i> User Management</h2>
+                    <p>View every user in MicroSOC and control access instantly.</p>
+                </div>
+                <div class="user-management-actions">
+                    <button type="button" class="btn btn-outline" id="user-management-refresh">
+                        <i class="fas fa-sync"></i> Refresh
+                    </button>
+                </div>
+            </div>
+            <div class="user-management-toolbar">
+                <div class="user-management-searchbox">
+                    <i class="fas fa-search"></i>
+                    <input type="text" id="user-management-search" placeholder="Search name, email, role...">
+                </div>
+            </div>
+            <div id="user-management-sections" class="user-management-sections">
+                <div class="table-responsive">
+                    <table class="data-table user-management-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Email</th>
+                                <th>Role</th>
+                                <th>Status</th>
+                                <th>Last Login</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="user-management-body">
+                            <tr><td colspan="6">Loading users...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+        host.insertAdjacentElement('afterbegin', panel);
+        panel.querySelector('.soc-route-tabs')?.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-route]');
+            if (!button) return;
+            navigateTo(button.dataset.route);
+        });
+        setExclusiveMainContentView(panel);
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return panel;
+    }
+
+    function closeUserManagementModal() {
+        document.getElementById('user-management-panel')?.remove();
+        restoreMainContentView();
+    }
+
+    function renderUserManagementUserRow(user) {
+        const normalizedRole = String(user.role || 'analyst').trim().toLowerCase();
+        const approvalStatus = String(user.approvalStatus || 'pending').trim().toLowerCase();
+        const isAdmin = normalizedRole === 'admin';
+        const isApproved = approvalStatus === 'approved';
+        const isRejected = approvalStatus === 'rejected';
+        const isActive = Boolean(user.isActive);
+        const statusLabel = isAdmin
+            ? 'Admin'
+            : isApproved
+                ? (isActive ? 'Approved' : 'Disabled')
+                : isRejected
+                    ? 'Rejected'
+                    : 'Pending';
+        const statusClass = isAdmin
+            ? 'badge-info'
+            : isApproved
+                ? (isActive ? 'badge-success' : 'badge-warning')
+                : isRejected
+                    ? 'badge-danger'
+                    : 'badge-warning';
+
+        let actionsHtml = '<span class="badge badge-info">Protected Admin</span>';
+        if (!isAdmin) {
+            if (!isApproved && !isRejected) {
+                actionsHtml = `
+                    <button type="button" class="btn btn-sm btn-outline" data-user-action="approve" data-user-id="${user.id}">Approve</button>
+                    <button type="button" class="btn btn-sm btn-outline" data-user-action="reject" data-user-id="${user.id}">Reject</button>
+                `;
+            } else if (isApproved && isActive) {
+                actionsHtml = `
+                    <button type="button" class="btn btn-sm btn-outline" data-user-action="disable" data-user-id="${user.id}">Disable</button>
+                `;
+            } else if (isApproved && !isActive) {
+                actionsHtml = `
+                    <button type="button" class="btn btn-sm btn-outline" data-user-action="enable" data-user-id="${user.id}">Enable</button>
+                `;
+            } else if (isRejected) {
+                actionsHtml = `
+                    <button type="button" class="btn btn-sm btn-outline" data-user-action="approve" data-user-id="${user.id}">Approve</button>
+                `;
+            }
+        }
+
+        return `
+            <tr>
+                <td>${user.name || 'Unknown'}</td>
+                <td>${user.email || 'Unknown'}</td>
+                <td><span class="badge badge-info">${String(user.role || 'analyst').toUpperCase()}</span></td>
+                <td><span class="badge ${statusClass}">${statusLabel}</span></td>
+                <td>${user.lastLogin ? new Date(user.lastLogin).toLocaleString() : 'Never'}</td>
+                <td>
+                    <div class="user-management-actions">
+                        ${actionsHtml}
+                    </div>
+                </td>
+            </tr>
+        `;
+    }
+
+    function renderUserManagementRows(users = [], search = '') {
+        const sections = document.getElementById('user-management-sections');
+        if (!sections) return;
+
+        const term = search.trim().toLowerCase();
+        const filtered = term
+            ? users.filter(user => [user.name, user.email, user.role, user.approvalStatus].join(' ').toLowerCase().includes(term))
+            : users;
+
+        if (!filtered.length) {
+            sections.innerHTML = '<div class="user-management-empty">No users found.</div>';
+            return;
+        }
+
+        const buckets = {
+            admin: filtered.filter((user) => String(user.role || '').trim().toLowerCase() === 'admin'),
+            analyst: filtered.filter((user) => String(user.role || '').trim().toLowerCase() === 'analyst'),
+            other: filtered.filter((user) => {
+                const role = String(user.role || '').trim().toLowerCase();
+                return role && role !== 'admin' && role !== 'analyst';
+            })
+        };
+
+        const renderSection = (title, count, usersInSection, emptyLabel) => `
+            <section class="user-management-group">
+                <div class="user-management-group-header">
+                    <div>
+                        <h3>${title}</h3>
+                        <p>${count} user${count === 1 ? '' : 's'} in this section.</p>
+                    </div>
+                    <span class="user-management-group-count">${count}</span>
+                </div>
+                <div class="table-responsive">
+                    <table class="data-table user-management-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Email</th>
+                                <th>Role</th>
+                                <th>Status</th>
+                                <th>Last Login</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${count
+                                ? usersInSection.map(renderUserManagementUserRow).join('')
+                                : `<tr><td colspan="6">${emptyLabel}</td></tr>`}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        `;
+
+        sections.innerHTML = `
+            ${renderSection('Admins', buckets.admin.length, buckets.admin, 'No admins found.')}
+            ${renderSection('Analysts', buckets.analyst.length, buckets.analyst, 'No analysts found.')}
+            ${buckets.other.length ? renderSection('Other Roles', buckets.other.length, buckets.other, 'No users found.') : ''}
+        `;
+    }
+
+    async function openUserManagementModal() {
+        const modal = ensureUserManagementModal();
+        if (!modal) {
+            window.alert('Unable to open User Management right now.');
+            return;
+        }
+        const tbody = modal.querySelector('#user-management-body');
+        const sections = modal.querySelector('#user-management-sections');
+        const refreshButton = modal.querySelector('#user-management-refresh');
+        const searchInput = modal.querySelector('#user-management-search');
+
+        if (sections) {
+            sections.innerHTML = '<div class="user-management-empty">Loading users...</div>';
+        } else if (tbody) {
+            tbody.innerHTML = '<tr><td colspan="6">Loading users...</td></tr>';
+        }
+
+        let users = [];
+
+        async function loadUsers() {
+            const payload = await apiRequest('/users');
+            users = payload.users || [];
+            renderUserManagementRows(users, searchInput.value);
+        }
+
+        if (!modal.dataset.bound) {
+            modal.dataset.bound = 'true';
+            refreshButton.addEventListener('click', () => {
+                loadUsers().catch(error => {
+                    tbody.innerHTML = `<tr><td colspan="6">${error.message}</td></tr>`;
+                });
+            });
+
+            searchInput.addEventListener('input', () => renderUserManagementRows(users, searchInput.value));
+
+            modal.addEventListener('click', async (event) => {
+                const actionButton = event.target.closest('[data-user-action]');
+                if (!actionButton) return;
+
+                const userId = actionButton.dataset.userId;
+                const action = actionButton.dataset.userAction;
+
+                try {
+                    await apiRequest(`/users/${userId}/access`, {
+                        method: 'PATCH',
+                        body: JSON.stringify({ action })
+                    });
+                    await loadUsers();
+                    refreshLiveCounts(document.getElementById('legacy-page') || document);
+                } catch (error) {
+                    window.alert(error.message || 'Could not update user');
+                }
+            });
+        }
+
+        try {
+            await loadUsers();
+        } catch (error) {
+            tbody.innerHTML = `<tr><td colspan="6">${error.message}</td></tr>`;
+        }
+    }
+
+    function renderSidebarNavigation(root) {
+        const sidebarNav = root?.querySelector('.sidebar-nav ul');
+        if (!sidebarNav) return;
+
+        const role = getCurrentUserRole();
+        const items = ROLE_NAVIGATION[role] || ROLE_NAVIGATION.analyst;
+        const route = (document.body.dataset.reactRoute || window.location.hash.replace(/^#\/?/, '') || 'login').split('?')[0];
+
+        sidebarNav.innerHTML = items.map(item => {
+            const itemRoute = item.href.startsWith('#/')
+                ? item.href.replace(/^#\//, '').split('?')[0]
+                : item.key === 'user-management'
+                    ? 'user-management'
+                    : item.href.split('#')[0].replace('.html', '');
+            const isActive = itemRoute === route;
+            const badge = item.badge
+                ? `<span class="badge ${item.badge.className}" id="${item.badge.id}">0</span>`
+                : '';
+            const adminFeatureAttr = item.key === 'user-management' ? ' data-admin-feature="user-management"' : '';
+
+            return `
+                <li class="${isActive ? 'active' : ''}" data-sidebar-key="${item.key}">
+                    <a href="${item.href}"${adminFeatureAttr} ${item.title ? `title="${item.title}"` : ''}>
+                        <i class="fas ${item.icon}"></i>
+                        <span>${item.label}</span>
+                        ${badge}
+                    </a>
+                </li>
+            `;
+        }).join('') + `
+            <li>
+                <a href="javascript:void(0)" onclick="toggleTheme(); return false;">
+                    <i class="fas fa-moon" id="theme-icon"></i>
+                    <span>Theme</span>
+                </a>
+            </li>
+            <li>
+                <a href="#" onclick="logout()">
+                    <i class="fas fa-sign-out-alt"></i>
+                    <span>Logout</span>
+                </a>
+            </li>
+        `;
+
+        sidebarNav.querySelectorAll('[data-admin-feature]').forEach((element) => {
+            element.addEventListener('click', (event) => {
+                event.preventDefault();
+                const feature = element.dataset.adminFeature || '';
+                if (feature === 'user-management') {
+                    navigateTo('user-management');
+                    return;
+                }
+                showFeatureUnavailable(element.querySelector('span')?.textContent || 'This feature');
+            });
+        });
+
+        observeSidebarNavigation(root);
+    }
+
+    function scheduleSidebarRepair(root) {
+        if (sidebarRepairTimer) return;
+        sidebarRepairTimer = setTimeout(() => {
+            sidebarRepairTimer = null;
+            enforceSidebarNavigationIntegrity(root);
+        }, 0);
+    }
+
+    function observeSidebarNavigation(root) {
+        const sidebarNav = root?.querySelector('.sidebar-nav ul');
+        if (!sidebarNav || sidebarObservers.has(sidebarNav)) return;
+
+        const observer = new MutationObserver(() => {
+            enforceSidebarNavigationIntegrity(root);
+        });
+        observer.observe(sidebarNav, { childList: true, subtree: true });
+        sidebarObservers.set(sidebarNav, observer);
+
+        observePageIntegrity(root);
+    }
+
+    function enforceSidebarNavigationIntegrity(root) {
+        const sidebarNav = root?.querySelector('.sidebar-nav ul');
+        if (!sidebarNav) return;
+
+        const role = getCurrentUserRole();
+        const expectedKeys = (ROLE_NAVIGATION[role] || ROLE_NAVIGATION.analyst).map((item) => item.key);
+        const currentKeys = Array.from(sidebarNav.querySelectorAll('li[data-sidebar-key]')).map((item) => item.dataset.sidebarKey);
+        const hasSecurityLogs = Boolean(sidebarNav.querySelector('a[href*="logs.html"]'));
+
+        if (!hasSecurityLogs || expectedKeys.join('|') !== currentKeys.join('|')) {
+            renderSidebarNavigation(root);
+        }
+    }
+
+    function observePageIntegrity(root) {
+        if (pageIntegrityObserver) return;
+
+        const observeTarget = root || document.body;
+        if (!observeTarget) return;
+
+        pageIntegrityObserver = new MutationObserver(() => {
+            const latestRoot = document.getElementById('legacy-page') || document;
+            enforceSidebarNavigationIntegrity(latestRoot);
+        });
+        pageIntegrityObserver.observe(observeTarget, { childList: true, subtree: true });
     }
 
     async function getNotificationItems() {
         try {
-            const payload = await apiRequest('/dashboard/alerts');
+            const payload = await apiRequest('/alerts/recent?limit=10');
             return (payload.alerts || []).map((alert) => ({
                 type: alert.severity === 'critical' ? 'critical' : alert.severity === 'high' ? 'warning' : 'info',
                 icon: alert.severity === 'critical' ? 'fa-exclamation-circle' : alert.severity === 'high' ? 'fa-exclamation-triangle' : 'fa-info-circle',
@@ -493,7 +1196,11 @@
         useEffect(() => {
             if (!guardRoute(route)) return;
 
-            const page = pages[route];
+            const page = pages[route] || (route === 'user-management'
+                ? { ...(pages.analytics || {}), title: 'User Management - MicroSOC Command Center' }
+                : route === 'settings'
+                    ? { ...(pages['settings'] || {}), title: 'Settings - MicroSOC Command Center' }
+                : null);
             if (!page) {
                 setReadyPage({ body: '', scripts: [], error: `Route "${route}" was not found.` });
                 return;
@@ -512,6 +1219,12 @@
                 const root = document.getElementById('legacy-page');
                 if (!root) return;
 
+                delete root.dataset.featureSuiteInstalled;
+                delete root.dataset.alertsConsoleInstalled;
+                delete root.dataset.auditLogsConsoleInstalled;
+                delete root.dataset.userManagementHidden;
+                delete root.dataset.settingsConsoleInstalled;
+
                 rewriteLinks(root);
                 for (const script of readyPage.scripts) {
                     if (cancelled) return;
@@ -526,6 +1239,10 @@
                 sanitizeAuthPage(route, root);
                 syncCurrentUserUi(root);
                 installFeatureSuite(route, root);
+                if (route !== 'user-management') {
+                    document.body.classList.remove('user-management-open');
+                    restoreMainContentView();
+                }
             }
 
             hydrateLegacyPage();
@@ -584,13 +1301,21 @@
     function installFeatureSuite(route, root) {
         if (!protectedRoutes.has(route) || !root || root.dataset.featureSuiteInstalled) return;
         root.dataset.featureSuiteInstalled = 'true';
-        renderRoleDashboard(root);
+        if (route !== 'audit-logs') {
+            renderRoleDashboard(root);
+        }
         refreshLiveCounts(root);
         if (route === 'dashboard') {
-            refreshLegacyDashboardData(root);
-            renderAttackVisualization(root);
+            if (typeof window.initDashboard === 'function') {
+                window.initDashboard();
+            } else {
+                refreshLegacyDashboardData(root);
+            }
+            root.querySelector('.feature-attack-viz')?.remove();
         }
-        if (route === 'logs') renderThreatFeed(root);
+        if (route === 'alerts') renderAlertsConsole(root);
+        if (route === 'audit-logs') renderAuditLogsConsole(root);
+        if (route === 'settings') renderSettingsConsole(root);
         if (route === 'incidents') {
             refreshLegacyIncidentStats(root);
             renderIncidentConsole(root);
@@ -614,11 +1339,11 @@
     }
 
     function isAdminUser() {
-        return (currentUser().role || 'analyst') === 'admin';
+        return String(currentUser().role || 'analyst').trim().toLowerCase() === 'admin';
     }
 
     function applyRoleRestrictions(root) {
-        const role = currentUser().role || 'analyst';
+        const role = String(currentUser().role || 'analyst').trim().toLowerCase();
         root.dataset.userRole = role;
 
         if (role === 'admin') return;
@@ -628,13 +1353,19 @@
             /assign roles?/i,
             /system settings/i,
             /threat feed configuration/i,
-            /audit logs?/i
+            /audit logs?/i,
+            /settings/i,
+            /create incident/i,
+            /archive/i,
+            /delete/i,
+            /export/i,
+            /generate/i
         ];
 
         root.querySelectorAll('[onclick], button, a, select, input').forEach((element) => {
             const action = element.getAttribute('onclick') || '';
             const label = element.textContent || element.getAttribute('title') || element.getAttribute('aria-label') || '';
-            const adminOnlyAction = /delete|clearLogs|deleteSelectedLogs|assignRole|userManagement|systemSettings|threatFeedConfig|audit/i.test(action);
+            const adminOnlyAction = /delete|clearLogs|deleteSelectedLogs|assignRole|userManagement|systemSettings|threatFeedConfig|audit|generateMock|createIncidentFromLog|export/i.test(action);
             const adminOnlyLabel = adminOnlyMatchers.some((matcher) => matcher.test(label));
 
             if (adminOnlyAction || adminOnlyLabel) {
@@ -650,7 +1381,7 @@
             const [incidentPayload, logPayload, alertPayload] = await Promise.all([
                 apiRequest('/incidents/stats'),
                 apiRequest('/logs/stats?timeRange=24h'),
-                apiRequest('/dashboard/alerts')
+                apiRequest('/alerts/stats?timeRange=24h')
             ]);
             const statusCounts = Object.fromEntries((incidentPayload.stats?.statusCounts || []).map(item => [item._id, item.count]));
             const activeIncidents = (statusCounts.open || 0) + (statusCounts.in_progress || 0);
@@ -662,7 +1393,7 @@
             });
             const notificationCount = root.querySelector('#notification-count');
             if (notificationCount) {
-                const requiringAction = alertPayload.summary?.requiringAction || 0;
+                const requiringAction = alertPayload.stats?.requiringAction?.[0]?.count || alertPayload.summary?.requiringAction || 0;
                 notificationCount.textContent = requiringAction;
                 notificationCount.style.display = requiringAction > 0 ? 'inline-flex' : 'none';
             }
@@ -746,93 +1477,1468 @@
         host.insertAdjacentElement(host.classList.contains('threat-ribbon') ? 'afterend' : 'afterbegin', strip);
     }
 
-    function renderThreatFeed(root) {
+    function renderAlertsConsole(root) {
         const host = findContentHost(root);
-        if (root.querySelector('.feature-threat-feed')) return;
-        const panel = document.createElement('section');
-        panel.className = 'feature-panel feature-threat-feed';
+        if (!host || root.dataset.alertsConsoleInstalled) return;
+        root.dataset.alertsConsoleInstalled = 'true';
+        const role = currentUser().role || 'analyst';
+
+        const existingSummary = root.querySelector('#alerts-summary');
+        const existingWorkbench = root.querySelector('#alerts-workbench');
+        const panel = existingSummary && existingWorkbench ? null : document.createElement('section');
+
+        let summary;
+        let workbench;
+        let refreshButton;
+        let activeInvestigationAlert = null;
+
+        if (panel) {
+            panel.className = 'feature-panel feature-alerts-console';
+            panel.innerHTML = `
+                <div class="feature-panel-header">
+                    <div>
+                        <h2 style="color:#0f172a !important;-webkit-text-fill-color:#0f172a !important;opacity:1 !important;text-shadow:none !important;font-weight:900 !important;">Threat Detection & Alerts</h2>
+                        <p style="color:#164e63 !important;-webkit-text-fill-color:#164e63 !important;opacity:1 !important;">Persistent alert queue, lifecycle actions, and evidence-backed detections.</p>
+                    </div>
+                    <div class="alerts-actions">
+                        <button type="button" class="btn btn-outline" data-refresh-alerts><i class="fas fa-sync"></i> Refresh</button>
+                    </div>
+                </div>
+                <div class="alerts-summary-grid" data-alerts-summary></div>
+                <div class="alerts-workbench" data-alerts-workbench></div>
+            `;
+            host.prepend(panel);
+            summary = panel.querySelector('[data-alerts-summary]');
+            workbench = panel.querySelector('[data-alerts-workbench]');
+            refreshButton = panel.querySelector('[data-refresh-alerts]');
+        } else {
+            summary = existingSummary;
+            workbench = existingWorkbench;
+            refreshButton = root.querySelector('[data-refresh-alerts]');
+        }
+
+        const escapeHtml = (value) => String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+
+        const alertId = (alert) => alert?._id || alert?.id || '';
+
+        function formatDateTime(value) {
+            if (!value) return 'Unknown';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return 'Unknown';
+            return date.toLocaleString();
+        }
+
+        function formatStatus(value) {
+            return String(value || 'new').replace(/_/g, ' ');
+        }
+
+        function getAlertDrawer() {
+            let drawer = root.querySelector('[data-alert-investigation-drawer]');
+            if (drawer) return drawer;
+
+            drawer = document.createElement('aside');
+            drawer.className = 'alert-investigation-drawer';
+            drawer.hidden = true;
+            drawer.setAttribute('data-alert-investigation-drawer', '');
+            drawer.innerHTML = `
+                <div class="alert-investigation-backdrop" data-close-investigation></div>
+                <section class="alert-investigation-panel" role="dialog" aria-modal="true" aria-label="Alert investigation">
+                    <div data-alert-investigation-content></div>
+                </section>
+            `;
+            (panel || host).appendChild(drawer);
+            return drawer;
+        }
+
+        function closeInvestigationDrawer() {
+            const drawer = getAlertDrawer();
+            drawer.hidden = true;
+            document.body.classList.remove('alert-investigation-open');
+        }
+
+        function renderInvestigationLoading(message = 'Loading investigation...') {
+            const drawer = getAlertDrawer();
+            drawer.hidden = false;
+            document.body.classList.add('alert-investigation-open');
+            drawer.querySelector('[data-alert-investigation-content]').innerHTML = `
+                <div class="investigation-loading">
+                    <i class="fas fa-spinner fa-spin"></i>
+                    <span>${escapeHtml(message)}</span>
+                </div>
+            `;
+        }
+
+        function summarizeEvidence(evidence) {
+            if (!evidence || typeof evidence !== 'object') return [];
+            return Object.entries(evidence)
+                .filter(([, value]) => value !== undefined && value !== null && value !== '')
+                .slice(0, 8)
+                .map(([key, value]) => [key, typeof value === 'object' ? JSON.stringify(value) : String(value)]);
+        }
+
+        function buildInvestigationSummary(alert, relatedLogs = []) {
+            const severity = String(alert.severity || 'medium').toLowerCase();
+            const hits = Number(alert.occurrenceCount || relatedLogs.length || 1);
+            const blockedCount = relatedLogs.filter(log => log.isBlocked).length;
+            const recommendations = [
+                `Correlate ${escapeHtml(alert.sourceIP || 'the source')} against recent Security Logs and attacker history.`,
+                severity === 'critical' || severity === 'high'
+                    ? 'Prioritize containment: block source, verify target health, and open an incident if not already linked.'
+                    : 'Monitor for recurrence and keep evidence attached before resolving.',
+                blockedCount
+                    ? `${blockedCount} related log${blockedCount === 1 ? '' : 's'} already show blocked activity.`
+                    : 'No blocked related log found in the current sample; verify firewall/WAF response.'
+            ];
+
+            return {
+                confidence: hits > 3 ? 'High' : hits > 1 ? 'Medium' : 'Low',
+                impact: severity === 'critical' ? 'Potential service or data impact' : severity === 'high' ? 'Likely active threat path' : 'Needs validation',
+                recommendations
+            };
+        }
+
+        async function loadRelatedLogsForAlert(alert) {
+            if (!alert?.sourceIP) return [];
+            try {
+                const params = new URLSearchParams({
+                    limit: '8',
+                    timeRange: 'all',
+                    sourceIP: alert.sourceIP
+                });
+                const payload = await apiRequest(`/logs?${params.toString()}`);
+                return Array.isArray(payload.logs) ? payload.logs : [];
+            } catch (error) {
+                console.warn('Related alert logs failed:', error);
+                return [];
+            }
+        }
+
+        function renderInvestigationDrawer(alert, relatedLogs = []) {
+            activeInvestigationAlert = alert;
+            const drawer = getAlertDrawer();
+            const content = drawer.querySelector('[data-alert-investigation-content]');
+            const summaryData = buildInvestigationSummary(alert, relatedLogs);
+            const evidenceItems = summarizeEvidence(alert.evidence);
+            const notes = Array.isArray(alert.notes) ? alert.notes : [];
+            const linkedLog = alert.log && typeof alert.log === 'object' ? alert.log : null;
+            const linkedIncident = alert.incident && typeof alert.incident === 'object' ? alert.incident : null;
+            const canAdminAct = role === 'admin';
+
+            content.innerHTML = `
+                <header class="investigation-header">
+                    <div>
+                        <p class="investigation-kicker">Alert Investigation</p>
+                        <h3>${escapeHtml(alert.title || 'Security Alert')}</h3>
+                        <div class="investigation-badges">
+                            <span class="investigation-severity ${escapeHtml(alert.severity || 'medium')}">${escapeHtml(String(alert.severity || 'medium').toUpperCase())}</span>
+                            <span>${escapeHtml(formatStatus(alert.status))}</span>
+                            <span>${escapeHtml(alert.mitreTechnique || 'MITRE unknown')}</span>
+                        </div>
+                    </div>
+                    <button type="button" class="investigation-close" data-close-investigation aria-label="Close investigation">&times;</button>
+                </header>
+
+                <div class="investigation-body">
+                    <section class="investigation-card investigation-card-wide">
+                        <h4><i class="fas fa-bullseye"></i> What Happened</h4>
+                        <p>${escapeHtml(alert.description || 'No description available.')}</p>
+                        <div class="investigation-facts">
+                            <span><strong>Source</strong>${escapeHtml(alert.sourceIP || 'Unknown')}</span>
+                            <span><strong>Target</strong>${escapeHtml(alert.targetSystem || 'Unknown')}</span>
+                            <span><strong>Attack</strong>${escapeHtml(alert.attackType || 'Threat')}</span>
+                            <span><strong>Hits</strong>${escapeHtml(alert.occurrenceCount || 1)}</span>
+                        </div>
+                    </section>
+
+                    <section class="investigation-card">
+                        <h4><i class="fas fa-clock"></i> Timeline</h4>
+                        <div class="investigation-timeline">
+                            <span><strong>First seen</strong>${escapeHtml(formatDateTime(alert.firstSeen || alert.createdAt))}</span>
+                            <span><strong>Last seen</strong>${escapeHtml(formatDateTime(alert.lastSeen || alert.updatedAt))}</span>
+                            <span><strong>Reviewed</strong>${escapeHtml(formatDateTime(alert.reviewedAt))}</span>
+                        </div>
+                    </section>
+
+                    <section class="investigation-card">
+                        <h4><i class="fas fa-brain"></i> AI Triage</h4>
+                        <div class="investigation-ai">
+                            <span><strong>Confidence</strong>${escapeHtml(summaryData.confidence)}</span>
+                            <span><strong>Impact</strong>${escapeHtml(summaryData.impact)}</span>
+                        </div>
+                        <ul>
+                            ${summaryData.recommendations.map(item => `<li>${item}</li>`).join('')}
+                        </ul>
+                    </section>
+
+                    <section class="investigation-card investigation-card-wide">
+                        <h4><i class="fas fa-stream"></i> Related Logs</h4>
+                        ${relatedLogs.length ? `
+                            <div class="investigation-log-list">
+                                ${relatedLogs.map(log => `
+                                    <div class="investigation-log-row">
+                                        <span>${escapeHtml(formatDateTime(log.timestamp || log.createdAt))}</span>
+                                        <strong>${escapeHtml(log.attackType || 'Threat')}</strong>
+                                        <span>${escapeHtml(log.targetSystem || 'Unknown target')}</span>
+                                        <span class="investigation-severity ${escapeHtml(log.severity || 'medium')}">${escapeHtml(String(log.severity || 'medium').toUpperCase())}</span>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        ` : '<p class="investigation-muted">No related logs found for this source IP yet.</p>'}
+                    </section>
+
+                    <section class="investigation-card">
+                        <h4><i class="fas fa-paperclip"></i> Evidence</h4>
+                        ${evidenceItems.length ? `
+                            <div class="investigation-evidence">
+                                ${evidenceItems.map(([key, value]) => `
+                                    <span><strong>${escapeHtml(key)}</strong>${escapeHtml(value)}</span>
+                                `).join('')}
+                            </div>
+                        ` : '<p class="investigation-muted">No structured evidence attached.</p>'}
+                    </section>
+
+                    <section class="investigation-card">
+                        <h4><i class="fas fa-link"></i> Links & Notes</h4>
+                        <div class="investigation-links">
+                            <span><strong>Linked Log</strong>${linkedLog ? escapeHtml(linkedLog._id || linkedLog.id || 'Available') : 'Not linked'}</span>
+                            <span><strong>Incident</strong>${linkedIncident ? escapeHtml(linkedIncident.title || linkedIncident._id) : 'Not created'}</span>
+                        </div>
+                        ${notes.length ? `
+                            <div class="investigation-notes">
+                                ${notes.slice(-3).map(note => `
+                                    <p>${escapeHtml(note.text || note)}<small>${escapeHtml(formatDateTime(note.createdAt))}</small></p>
+                                `).join('')}
+                            </div>
+                        ` : '<p class="investigation-muted">No analyst notes yet.</p>'}
+                    </section>
+                </div>
+
+                <footer class="investigation-footer">
+                    <button type="button" data-close-investigation>Close</button>
+                    <button type="button" data-investigation-view-logs>View Related Logs</button>
+                    ${canAdminAct ? `
+                        <button type="button" data-investigation-status="in_progress">Mark In Progress</button>
+                        <button type="button" data-investigation-create-incident>Create Incident</button>
+                        <button type="button" data-investigation-status="resolved">Resolve</button>
+                    ` : '<button type="button" data-investigation-escalate>Escalate</button>'}
+                </footer>
+            `;
+        }
+
+        async function openInvestigation(alertIdValue, options = {}) {
+            renderInvestigationLoading(options.markInProgress ? 'Opening investigation...' : 'Loading alert evidence...');
+            try {
+                let payload = await apiRequest(`/alerts/${alertIdValue}`);
+                let selected = payload.alert;
+
+                if (
+                    options.markInProgress &&
+                    role === 'admin' &&
+                    selected?.status !== 'in_progress' &&
+                    !['resolved', 'closed'].includes(selected?.status)
+                ) {
+                    payload = await apiRequest(`/alerts/${alertIdValue}`, {
+                        method: 'PATCH',
+                        body: JSON.stringify({
+                            status: 'in_progress',
+                            notes: [{ text: 'Investigation started from Alerts console.' }]
+                        })
+                    });
+                    selected = payload.alert || selected;
+                    await loadAlerts();
+                }
+
+                const relatedLogs = await loadRelatedLogsForAlert(selected);
+                renderInvestigationDrawer(selected, relatedLogs);
+            } catch (error) {
+                getAlertDrawer().querySelector('[data-alert-investigation-content]').innerHTML = `
+                    <div class="investigation-error">
+                        <button type="button" class="investigation-close" data-close-investigation aria-label="Close investigation">&times;</button>
+                        <i class="fas fa-triangle-exclamation"></i>
+                        <h3>Investigation failed</h3>
+                        <p>${escapeHtml(error.message || 'Could not load alert investigation.')}</p>
+                    </div>
+                `;
+            }
+        }
+
+        function applyAlertsTheme() {
+            const themeHref = document.getElementById('theme-style')?.getAttribute('href') || '';
+            const isLight = themeHref.includes('light-theme') || document.body.dataset.theme === 'light' || localStorage.getItem('theme') === 'light';
+            const titleColor = isLight ? '#0f172a' : '#dbeafe';
+            const subtitleColor = isLight ? '#164e63' : '#94a3b8';
+            const iconColor = isLight ? '#0e7490' : '#22c1dc';
+            const sectionTitleColor = isLight ? '#0f172a' : '#e5eefb';
+            const titleTargets = root.querySelectorAll('.feature-alerts-console .feature-panel-header > div > h2, .feature-alerts-console .feature-panel-header > div > p, .feature-alerts-console .feature-panel-header > div > h2 i, .feature-alerts-console .card-header h3, .feature-alerts-console .card-header h3 i, .feature-alerts-console > .feature-panel-header > div > h2, .feature-alerts-console > .feature-panel-header > div > p, .feature-alerts-console > .card > .card-header > h3, .feature-alerts-console > .card > .card-header > h3 i');
+            const textTargets = root.querySelectorAll('h1, h2, h3, p');
+
+            titleTargets.forEach((node) => {
+                if (!node) return;
+                const isIcon = node.tagName === 'I';
+                const isSubtitle = node.tagName === 'P';
+                const color = isIcon ? iconColor : (isSubtitle ? subtitleColor : titleColor);
+                node.style.setProperty('color', color, 'important');
+                node.style.setProperty('-webkit-text-fill-color', color, 'important');
+                node.style.setProperty('opacity', '1', 'important');
+                node.style.setProperty('text-shadow', 'none', 'important');
+            });
+
+            root.querySelectorAll('.feature-alerts-console .card-header h3, .feature-alerts-console .feature-panel-header h2').forEach((node) => {
+                node.style.setProperty('color', sectionTitleColor, 'important');
+                node.style.setProperty('-webkit-text-fill-color', sectionTitleColor, 'important');
+                node.style.setProperty('opacity', '1', 'important');
+                node.style.setProperty('text-shadow', 'none', 'important');
+                node.style.setProperty('font-weight', '900', 'important');
+            });
+
+            root.querySelectorAll('.feature-alerts-console .card-header h3 i, .feature-alerts-console .feature-panel-header h2 i').forEach((icon) => {
+                icon.style.setProperty('color', iconColor, 'important');
+            });
+
+            textTargets.forEach((node) => {
+                const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+                if (text === 'Threat Detection & Alerts' || text === 'Active Alerts') {
+                    const isSection = text === 'Active Alerts';
+                    const color = isSection ? sectionTitleColor : titleColor;
+                    node.style.setProperty('color', color, 'important');
+                    node.style.setProperty('-webkit-text-fill-color', color, 'important');
+                    node.style.setProperty('opacity', '1', 'important');
+                    node.style.setProperty('text-shadow', 'none', 'important');
+                    node.style.setProperty('font-weight', '900', 'important');
+                    const icon = node.querySelector('i');
+                    if (icon) {
+                        icon.style.setProperty('color', iconColor, 'important');
+                    }
+                }
+            });
+        }
+
+        applyAlertsTheme();
+        window.addEventListener('microsoc:theme-changed', applyAlertsTheme);
+
+        function renderSummary(stats = {}) {
+            const statusCounts = Object.fromEntries((stats.statusCounts || []).map(item => [item._id, item.count]));
+            const severityCounts = Object.fromEntries((stats.severityCounts || []).map(item => [item._id, item.count]));
+            const requiringAction = stats.requiringAction?.[0]?.count || 0;
+            const total = stats.totalAlerts?.[0]?.count || 0;
+            summary.innerHTML = [
+                ['Total Alerts', total, 'fa-bell'],
+                ['Needs Action', requiringAction, 'fa-exclamation-triangle'],
+                ['Critical', severityCounts.critical || 0, 'fa-skull-crossbones'],
+                ['Resolved', statusCounts.resolved || 0, 'fa-check-circle']
+            ].map(([title, value, icon]) => `
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: #0dcaf020; color: #0dcaf0">
+                        <i class="fas ${icon}"></i>
+                    </div>
+                    <div class="stat-info">
+                        <h3>${title}</h3>
+                        <div class="stat-value">${value}</div>
+                        <div class="stat-change positive">Live</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderAlerts(alerts = []) {
+            if (!alerts.length) {
+                workbench.innerHTML = '<p class="empty-state">No alerts found for the selected window.</p>';
+                return;
+            }
+
+            workbench.innerHTML = alerts.map(alert => `
+                <article class="alert-ticket ${escapeHtml(alert.severity || 'medium')}">
+                    <div class="alert-ticket-main">
+                        <div class="alert-ticket-header">
+                            <strong>${escapeHtml(alert.title || 'Security Alert')}</strong>
+                            <span>${escapeHtml(formatStatus(alert.status))}</span>
+                        </div>
+                        <p>${escapeHtml(alert.description || 'No description available.')}</p>
+                        <div class="alert-meta">
+                            <span><i class="fas fa-shield-virus"></i> ${escapeHtml(alert.attackType || 'Threat')}</span>
+                            <span><i class="fas fa-network-wired"></i> ${escapeHtml(alert.sourceIP || 'Unknown')}</span>
+                            <span><i class="fas fa-fingerprint"></i> ${escapeHtml(alert.mitreTechnique || 'Unknown')}</span>
+                            <span><i class="fas fa-copy"></i> ${escapeHtml(alert.occurrenceCount || 1)} hits</span>
+                        </div>
+                    </div>
+                    <div class="ticket-actions">
+                        <button type="button" data-alert-view="${escapeHtml(alertId(alert))}">View</button>
+                        <button type="button" data-alert-investigate="${escapeHtml(alertId(alert))}">Investigate</button>
+                        ${role === 'admin'
+                            ? `<button type="button" data-alert-status="${escapeHtml(alertId(alert))}:resolved">Resolve</button><button type="button" data-alert-delete="${escapeHtml(alertId(alert))}">Archive</button>`
+                            : '<button type="button" data-alert-escalate>Escalate</button>'}
+                    </div>
+                </article>
+            `).join('');
+        }
+
+        async function loadAlerts() {
+            const [alertsPayload, statsPayload] = await Promise.all([
+                apiRequest('/alerts/recent?limit=25'),
+                apiRequest('/alerts/stats?timeRange=24h')
+            ]);
+            renderSummary(statsPayload.stats || alertsPayload.stats || {});
+            renderAlerts(alertsPayload.alerts || []);
+        }
+
+        refreshButton?.addEventListener('click', () => {
+            loadAlerts().catch(error => {
+                workbench.innerHTML = `<p class="empty-state">${error.message}</p>`;
+            });
+        });
+
+        workbench.addEventListener('click', async (event) => {
+            const statusButton = event.target.closest('[data-alert-status]');
+            const deleteButton = event.target.closest('[data-alert-delete]');
+            const viewButton = event.target.closest('[data-alert-view]');
+            const investigateButton = event.target.closest('[data-alert-investigate]');
+            const escalateButton = event.target.closest('[data-alert-escalate]');
+
+            if (investigateButton) {
+                await openInvestigation(investigateButton.dataset.alertInvestigate, { markInProgress: true });
+                return;
+            }
+
+            if (statusButton) {
+                const [id, status] = statusButton.dataset.alertStatus.split(':');
+                await apiRequest(`/alerts/${id}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ status, note: `Status updated to ${status}` })
+                });
+                await loadAlerts();
+            }
+
+            if (deleteButton) {
+                const reason = prompt('Archive reason:', 'No longer relevant') || 'No longer relevant';
+                await apiRequest(`/alerts/${deleteButton.dataset.alertDelete}`, {
+                    method: 'DELETE',
+                    body: JSON.stringify({ reason })
+                });
+                    await loadAlerts();
+                }
+
+            if (escalateButton) {
+                window.alert('Escalation noted. Use the incident workflow to create a follow-up case.');
+            }
+
+            if (viewButton) {
+                await openInvestigation(viewButton.dataset.alertView);
+            }
+        });
+
+        root.addEventListener('click', async (event) => {
+            if (event.target.closest('[data-close-investigation]')) {
+                closeInvestigationDrawer();
+                return;
+            }
+
+            const statusButton = event.target.closest('[data-investigation-status]');
+            if (statusButton && activeInvestigationAlert) {
+                const status = statusButton.dataset.investigationStatus;
+                await apiRequest(`/alerts/${alertId(activeInvestigationAlert)}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({
+                        status,
+                        notes: [{ text: `Investigation drawer updated status to ${status}.` }]
+                    })
+                });
+                await loadAlerts();
+                await openInvestigation(alertId(activeInvestigationAlert));
+                if (typeof window.showNotification === 'function') {
+                    window.showNotification(`Alert marked ${formatStatus(status)}`, 'success');
+                }
+                return;
+            }
+
+            if (event.target.closest('[data-investigation-view-logs]') && activeInvestigationAlert) {
+                window.navigateTo ? window.navigateTo('logs') : (window.location.href = 'logs.html');
+                return;
+            }
+
+            if (event.target.closest('[data-investigation-escalate]')) {
+                window.alert('Escalation noted. Ask an admin to create or assign an incident from this investigation.');
+                return;
+            }
+
+            if (event.target.closest('[data-investigation-create-incident]') && activeInvestigationAlert) {
+                const selected = activeInvestigationAlert;
+                const linkedLogId = selected.log && typeof selected.log === 'object'
+                    ? (selected.log._id || selected.log.id)
+                    : selected.log;
+                const isValidSourceIP = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(String(selected.sourceIP || ''));
+                const incidentPayload = {
+                    title: `Alert: ${selected.title || selected.attackType || 'Security investigation'}`,
+                    description: `${selected.description || 'Created from alert investigation.'}\n\nSource: ${selected.sourceIP || 'Unknown'}\nMITRE: ${selected.mitreTechnique || 'Unknown'}\nHits: ${selected.occurrenceCount || 1}`,
+                    severity: ['critical', 'high', 'medium', 'low'].includes(selected.severity) ? selected.severity : 'medium',
+                    status: 'open',
+                    category: 'other',
+                    affectedSystems: [selected.targetSystem].filter(Boolean),
+                    relatedLogs: linkedLogId ? [linkedLogId] : [],
+                    impact: ['critical', 'high'].includes(selected.severity) ? 'high' : 'medium',
+                    priority: ['critical', 'high'].includes(selected.severity) ? selected.severity : 'medium'
+                };
+                if (isValidSourceIP) {
+                    incidentPayload.sourceIP = selected.sourceIP;
+                }
+
+                const payload = await apiRequest('/incidents', {
+                    method: 'POST',
+                    body: JSON.stringify(incidentPayload)
+                });
+                await apiRequest(`/alerts/${alertId(selected)}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({
+                        incident: payload.incident?._id || payload.incident?.id,
+                        notes: [{ text: `Incident created from investigation: ${payload.incident?.title || 'Incident'}` }]
+                    })
+                }).catch(() => null);
+                await loadAlerts();
+                await openInvestigation(alertId(selected));
+                if (typeof window.showNotification === 'function') {
+                    window.showNotification('Incident created from alert investigation', 'success');
+                }
+            }
+        });
+
+        loadAlerts().catch(error => {
+            workbench.innerHTML = `<p class="empty-state">${error.message}</p>`;
+        });
+    }
+
+    function renderAuditLogsConsole(root) {
+        const host = findContentHost(root);
+        if (!host || root.dataset.auditLogsConsoleInstalled) return;
+        root.dataset.auditLogsConsoleInstalled = 'true';
+
+        const panel = root.querySelector('.feature-audit-logs-console');
+        if (!panel) return;
+
+        root.querySelector('.main-header .header-right [data-audit-refresh]')?.remove();
+        const role = currentUser().role || 'analyst';
+        const existingChrome = root.querySelector('.audit-logs-chrome');
+
+        const escapeHtml = (value) => String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+
+        if (!existingChrome) {
+            const chrome = document.createElement('div');
+            chrome.className = 'audit-logs-chrome';
+            chrome.innerHTML = `
+                <div class="threat-ribbon">
+                    <span><i class="fas fa-shield-virus"></i> Threat Level: Elevated</span>
+                    <span><i class="fas fa-satellite-dish"></i> Sensors: Online</span>
+                    <span><i class="fas fa-fingerprint"></i> Identity Guard: Active</span>
+                    <span><i class="fas fa-bolt"></i> AUDIT LOGS Console</span>
+                </div>
+                <div class="role-dashboard-strip ${role}">
+                    <div>
+                        <strong>${role === 'admin' ? 'Admin Command View' : 'Analyst Triage View'}</strong>
+                        <span>${role === 'admin' ? 'User approvals, system-wide audit visibility, and policy controls enabled.' : 'Focused view for audit visibility and review-only operations.'}</span>
+                    </div>
+                    <div class="role-actions">
+                        <span><i class="fas fa-user-shield"></i> ${role.toUpperCase()}</span>
+                        <span><i class="fas fa-clipboard-list"></i> Audit Controls</span>
+                        ${role === 'admin' ? '<span><i class="fas fa-lock-open"></i> Admin controls enabled</span>' : '<span><i class="fas fa-lock"></i> Admin controls hidden</span>'}
+                    </div>
+                </div>
+                <div class="soc-route-tabs">
+                    <button type="button" class="soc-route-tab" data-route="dashboard">Dashboard</button>
+                    <button type="button" class="soc-route-tab" data-route="logs">Security Logs</button>
+                    <button type="button" class="soc-route-tab" data-route="alerts">Alerts</button>
+                    <button type="button" class="soc-route-tab" data-route="incidents">Incidents</button>
+                    <button type="button" class="soc-route-tab" data-route="analytics">Analytics</button>
+                    <button type="button" class="soc-route-tab active" data-route="audit-logs">Audit Logs</button>
+                    ${role === 'admin' ? '<button type="button" class="soc-route-tab" data-route="user-management">User Management</button><button type="button" class="soc-route-tab" data-route="settings">Settings</button>' : ''}
+                </div>
+            `;
+            host.insertBefore(chrome, host.firstChild);
+            chrome.querySelector('.soc-route-tabs')?.addEventListener('click', (event) => {
+                const button = event.target.closest('[data-route]');
+                if (!button) return;
+                navigateTo(button.dataset.route);
+            });
+        }
+
         panel.innerHTML = `
             <div class="feature-panel-header">
                 <div>
-                    <h2>Real-Time Threat Feed</h2>
-                    <p>Live log stream, WebSocket updates, and auto-refresh alerts.</p>
+                    <h2 style="font-size:26px;font-weight:900;line-height:1.1;"><i class="fas fa-history"></i> Audit Activity</h2>
+                    <p>Real activity only. Grouped by actor type and date with full event context.</p>
                 </div>
-                <button type="button" class="btn btn-primary" data-generate-log><i class="fas fa-bolt"></i> Generate Event</button>
+                <div class="audit-logs-actions">
+                    <button type="button" class="btn btn-outline" data-audit-refresh>
+                        <i class="fas fa-sync"></i> Refresh
+                    </button>
+                </div>
             </div>
-            <div class="feed-status"><span class="pulse"></span><strong data-feed-state>Connecting</strong><span data-feed-meta>Waiting for backend feed</span></div>
-            <div class="live-log-stream" data-live-log-stream></div>
+            <div class="audit-logs-toolbar">
+                <input type="text" data-audit-search placeholder="Search user, action, module, target...">
+                <select data-audit-time>
+                    <option value="24h">Last 24 Hours</option>
+                    <option value="7d" selected>Last 7 Days</option>
+                    <option value="30d">Last 30 Days</option>
+                    <option value="all">All Time</option>
+                </select>
+                <select data-audit-module>
+                    <option value="all" selected>All Modules</option>
+                    <option value="auth">Auth</option>
+                    <option value="users">Users</option>
+                    <option value="incidents">Incidents</option>
+                    <option value="logs">Logs</option>
+                    <option value="reports">Reports</option>
+                    <option value="settings">Settings</option>
+                </select>
+                <select data-audit-result>
+                    <option value="all" selected>All Results</option>
+                    <option value="success">Success</option>
+                    <option value="warning">Warning</option>
+                    <option value="failure">Failure</option>
+                </select>
+            </div>
+            <div class="audit-summary-grid" data-audit-summary></div>
+            <div class="audit-role-groups" data-audit-groups></div>
+            <div class="audit-drawer-backdrop" data-audit-backdrop hidden></div>
+            <aside class="audit-details-drawer" data-audit-drawer hidden>
+                <div class="audit-drawer-header">
+                    <div>
+                        <p class="audit-drawer-kicker">Audit Entry</p>
+                        <h3 data-audit-drawer-title>Details</h3>
+                    </div>
+                    <button type="button" class="audit-drawer-close" data-audit-drawer-close aria-label="Close details">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="audit-drawer-body" data-audit-drawer-body></div>
+            </aside>
         `;
-        host.appendChild(panel);
-        const stream = panel.querySelector('[data-live-log-stream]');
-        const state = panel.querySelector('[data-feed-state]');
-        const meta = panel.querySelector('[data-feed-meta]');
 
-        function addLog(log) {
-            const row = document.createElement('div');
-            row.className = `live-log-row ${log.severity || 'medium'}`;
-            row.innerHTML = `
-                <span>${new Date(log.timestamp || Date.now()).toLocaleTimeString()}</span>
-                <strong>${log.attackType || 'Threat'}</strong>
-                <code>${log.sourceIP || '0.0.0.0'}</code>
-                <span>${log.targetSystem || 'unknown'}</span>
-                <em>${log.severity || 'medium'}</em>
-            `;
-            stream.prepend(row);
-            Array.from(stream.children).slice(20).forEach(child => child.remove());
+        const summary = panel.querySelector('[data-audit-summary]');
+        const groups = panel.querySelector('[data-audit-groups]');
+        const refreshButton = panel.querySelector('[data-audit-refresh]');
+        const searchInput = panel.querySelector('[data-audit-search]');
+        const timeSelect = panel.querySelector('[data-audit-time]');
+        const moduleSelect = panel.querySelector('[data-audit-module]');
+        const resultSelect = panel.querySelector('[data-audit-result]');
+        const drawer = panel.querySelector('[data-audit-drawer]');
+        const drawerBackdrop = panel.querySelector('[data-audit-backdrop]');
+        const drawerClose = panel.querySelector('[data-audit-drawer-close]');
+        const drawerTitle = panel.querySelector('[data-audit-drawer-title]');
+        const drawerBody = panel.querySelector('[data-audit-drawer-body]');
+
+        if (!summary || !groups || !searchInput || !timeSelect || !moduleSelect || !resultSelect || !drawer || !drawerBody) return;
+
+        panel.querySelector('.soc-route-tabs')?.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-route]');
+            if (!button) return;
+            navigateTo(button.dataset.route);
+        });
+
+        timeSelect.value = 'all';
+
+        const roleMeta = {
+            admin: {
+                label: 'Admin Actions',
+                icon: 'fa-user-shield',
+                description: 'Actions performed by administrators.'
+            },
+            analyst: {
+                label: 'Analyst Actions',
+                icon: 'fa-user-astronaut',
+                description: 'Actions performed by analysts.'
+            },
+            system: {
+                label: 'System Actions',
+                icon: 'fa-gear',
+                description: 'Automated system events and backend activity.'
+            },
+            other: {
+                label: 'Other Actions',
+                icon: 'fa-circle-question',
+                description: 'Entries that do not match a known actor role.'
+            }
+        };
+
+        let currentLogs = [];
+
+        function normalizeRole(role) {
+            const value = String(role || 'system').trim().toLowerCase();
+            if (value === 'admin' || value === 'analyst' || value === 'system') return value;
+            return 'other';
         }
 
-        apiRequest('/logs?limit=8&timeRange=all')
-            .then(data => (data.logs || []).reverse().forEach(addLog))
-            .catch(() => {
-                meta.textContent = 'Login session or backend is unavailable';
+        function formatDateLabel(value) {
+            return new Date(value || Date.now()).toLocaleDateString('en-GB', {
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric'
+            });
+        }
+
+        function formatDateTime(value) {
+            return new Date(value || Date.now()).toLocaleString('en-GB', {
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        }
+
+        function formatJson(value) {
+            try {
+                return JSON.stringify(value || {}, null, 2);
+            } catch (error) {
+                return '{}';
+            }
+        }
+
+        const renderSummary = (stats = {}) => {
+            const totalEvents = stats.totalEvents?.[0]?.count || 0;
+            const byRole = Object.fromEntries((stats.byRole || []).map((item) => [normalizeRole(item._id), item.count]));
+            const byResult = Object.fromEntries((stats.byResult || []).map((item) => [item._id, item.count]));
+            const byModule = Object.fromEntries((stats.byModule || []).map((item) => [item._id, item.count]));
+
+            summary.innerHTML = [
+                ['Total Events', totalEvents, 'fa-stream'],
+                ['Admin Actions', byRole.admin || 0, 'fa-user-shield'],
+                ['Analyst Actions', byRole.analyst || 0, 'fa-user-astronaut'],
+                ['System Actions', byRole.system || 0, 'fa-gear'],
+                ['Failures', byResult.failure || 0, 'fa-triangle-exclamation']
+            ].map(([title, value, icon]) => `
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: rgba(6, 182, 212, 0.12); color: var(--soc-cyan)">
+                        <i class="fas ${icon}"></i>
+                    </div>
+                    <div class="stat-info">
+                        <h3>${escapeHtml(title)}</h3>
+                        <div class="stat-value">${escapeHtml(value)}</div>
+                        <div class="stat-change positive">Live</div>
+                    </div>
+                </div>
+            `).join('');
+        };
+
+        function renderDrawer(log) {
+            if (!log) return;
+            drawerTitle.textContent = log.action || 'Audit Entry';
+            drawerBody.innerHTML = `
+                <div class="audit-drawer-section">
+                    <span class="audit-drawer-label">Timestamp</span>
+                    <strong>${escapeHtml(formatDateTime(log.timestamp))}</strong>
+                </div>
+                <div class="audit-drawer-section">
+                    <span class="audit-drawer-label">Actor</span>
+                    <strong>${escapeHtml(log.actorName || 'System')}</strong>
+                    <div class="audit-subtext">${escapeHtml(log.actorEmail || 'Unknown')}</div>
+                </div>
+                <div class="audit-drawer-grid">
+                    <div class="audit-drawer-section">
+                        <span class="audit-drawer-label">Role</span>
+                        <strong>${escapeHtml(String(log.actorRole || 'system').toUpperCase())}</strong>
+                    </div>
+                    <div class="audit-drawer-section">
+                        <span class="audit-drawer-label">Result</span>
+                        <strong>${escapeHtml(String(log.result || 'success').toUpperCase())}</strong>
+                    </div>
+                    <div class="audit-drawer-section">
+                        <span class="audit-drawer-label">Module</span>
+                        <strong>${escapeHtml(log.module || 'general')}</strong>
+                    </div>
+                    <div class="audit-drawer-section">
+                        <span class="audit-drawer-label">Target</span>
+                        <strong>${escapeHtml(log.targetLabel || log.targetType || 'N/A')}</strong>
+                    </div>
+                </div>
+                <div class="audit-drawer-section">
+                    <span class="audit-drawer-label">Details</span>
+                    <p>${escapeHtml(log.details || 'No details')}</p>
+                </div>
+                <div class="audit-drawer-section">
+                    <span class="audit-drawer-label">Metadata</span>
+                    <pre>${escapeHtml(formatJson(log.metadata))}</pre>
+                </div>
+                <div class="audit-drawer-section">
+                    <span class="audit-drawer-label">Technical</span>
+                    <div class="audit-subtext">IP: ${escapeHtml(log.ipAddress || 'Unknown')}</div>
+                    <div class="audit-subtext">User Agent: ${escapeHtml(log.userAgent || 'Unknown')}</div>
+                    <div class="audit-subtext">Record ID: ${escapeHtml(log.id || log._id || 'Unknown')}</div>
+                </div>
+            `;
+            drawer.hidden = false;
+            drawerBackdrop.hidden = false;
+            document.body.classList.add('audit-drawer-open');
+        }
+
+        function closeDrawer() {
+            drawer.hidden = true;
+            drawerBackdrop.hidden = true;
+            document.body.classList.remove('audit-drawer-open');
+        }
+
+        function groupLogs(logs = []) {
+            const roleGroups = {
+                admin: [],
+                analyst: [],
+                system: [],
+                other: []
+            };
+
+            logs.forEach((log, index) => {
+                const key = normalizeRole(log.actorRole);
+                roleGroups[key].push({ ...log, __index: index });
             });
 
-        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${wsProtocol}//${new URL(window.MICROSOC_API_BASE_URL).host}/ws/threat-feed`;
-        try {
-            const socket = new WebSocket(wsUrl);
-            socket.addEventListener('open', () => {
-                state.textContent = 'WebSocket live';
-                meta.textContent = 'New logs appear automatically';
+            return roleGroups;
+        }
+
+        function renderGroups(logs = []) {
+            closeDrawer();
+            if (!logs.length) {
+                groups.innerHTML = `
+                    <div class="user-management-empty audit-empty-state">
+                        No real audit activity yet for the selected filters.
+                    </div>
+                `;
+                return;
+            }
+
+            const roleGroups = groupLogs(logs);
+
+            groups.innerHTML = Object.entries(roleMeta)
+                .map(([role, meta]) => {
+                    const items = roleGroups[role] || [];
+                    if (!items.length) return '';
+
+                    const dateBuckets = items.reduce((acc, log) => {
+                        const dateKey = formatDateLabel(log.timestamp);
+                        if (!acc[dateKey]) acc[dateKey] = [];
+                        acc[dateKey].push(log);
+                        return acc;
+                    }, {});
+
+                    const dateSections = Object.entries(dateBuckets)
+                        .map(([dateLabel, dateLogs]) => `
+                            <article class="audit-date-group">
+                                <div class="audit-date-header">
+                                    <div>
+                                        <h4>${escapeHtml(dateLabel)}</h4>
+                                        <p>${escapeHtml(`${dateLogs.length} event${dateLogs.length === 1 ? '' : 's'}`)}</p>
+                                    </div>
+                                </div>
+                                <div class="table-responsive">
+                                    <table class="data-table audit-logs-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Time</th>
+                                                <th>Actor</th>
+                                                <th>Action</th>
+                                                <th>Module</th>
+                                                <th>Target</th>
+                                                <th>Result</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            ${dateLogs.map((log) => `
+                                                <tr class="audit-log-row" data-audit-index="${log.__index}">
+                                                    <td>${escapeHtml(new Date(log.timestamp || Date.now()).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))}</td>
+                                                    <td>
+                                                        <strong>${escapeHtml(log.actorName || 'System')}</strong>
+                                                        <div class="audit-subtext">${escapeHtml(log.actorEmail || 'Unknown')}</div>
+                                                    </td>
+                                                    <td><strong>${escapeHtml(log.action || 'Action')}</strong></td>
+                                                    <td><span class="audit-module">${escapeHtml(log.module || 'general')}</span></td>
+                                                    <td>
+                                                        <div>${escapeHtml(log.targetLabel || log.targetType || 'N/A')}</div>
+                                                        <div class="audit-subtext">${escapeHtml([log.targetType, log.targetId].filter(Boolean).join(' · '))}</div>
+                                                    </td>
+                                                    <td><span class="badge badge-${log.result === 'failure' ? 'danger' : log.result === 'warning' ? 'warning' : 'success'}">${escapeHtml(String(log.result || 'success').toUpperCase())}</span></td>
+                                                </tr>
+                                            `).join('')}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </article>
+                        `)
+                        .join('');
+
+                    return `
+                        <section class="audit-role-group">
+                            <div class="audit-role-group-header">
+                                <div>
+                                    <h3><i class="fas ${meta.icon}"></i> ${escapeHtml(meta.label)}</h3>
+                                    <p>${escapeHtml(meta.description)}</p>
+                                </div>
+                                <span class="audit-role-count">${escapeHtml(items.length)}</span>
+                            </div>
+                            <div class="audit-date-groups">${dateSections}</div>
+                        </section>
+                    `;
+                })
+                .join('') || '<div class="user-management-empty audit-empty-state">No audit logs found for the selected filters.</div>';
+        }
+
+        async function loadAuditLogs() {
+            const params = new URLSearchParams();
+            params.set('timeRange', timeSelect.value);
+            params.set('module', moduleSelect.value);
+            params.set('result', resultSelect.value);
+            params.set('search', searchInput.value.trim());
+            params.set('limit', '200');
+
+            const payload = await apiRequest(`/audit-logs?${params.toString()}`);
+            currentLogs = payload.logs || [];
+            renderSummary(payload.stats || {});
+            renderGroups(currentLogs);
+        }
+
+        groups.addEventListener('click', (event) => {
+            const row = event.target.closest('[data-audit-index]');
+            if (!row) return;
+            const log = currentLogs[Number(row.dataset.auditIndex)];
+            if (!log) return;
+            renderDrawer(log);
+        });
+
+        drawerBackdrop.addEventListener('click', closeDrawer);
+        drawerClose.addEventListener('click', closeDrawer);
+
+        closeDrawer();
+
+        refreshButton?.addEventListener('click', () => {
+            loadAuditLogs().catch((error) => {
+                groups.innerHTML = `<div class="user-management-empty audit-empty-state">${escapeHtml(error.message)}</div>`;
             });
-            socket.addEventListener('message', (event) => {
-                const payload = JSON.parse(event.data);
-                if (payload.log) addLog(payload.log);
-                if (payload.alert && typeof window.showNotification === 'function') {
-                    window.showNotification(payload.alert.message, payload.alert.severity === 'critical' ? 'error' : 'warning');
+        });
+
+        [searchInput, timeSelect, moduleSelect, resultSelect].forEach((element) => {
+            element.addEventListener('input', () => {
+                loadAuditLogs().catch((error) => {
+                    groups.innerHTML = `<div class="user-management-empty audit-empty-state">${escapeHtml(error.message)}</div>`;
+                });
+            });
+            element.addEventListener('change', () => {
+                loadAuditLogs().catch((error) => {
+                    groups.innerHTML = `<div class="user-management-empty audit-empty-state">${escapeHtml(error.message)}</div>`;
+                });
+            });
+        });
+
+        if (!isAdminUser()) {
+            summary.innerHTML = '';
+            groups.innerHTML = '<div class="user-management-empty audit-empty-state">You do not have permission to view audit logs.</div>';
+            return;
+        }
+
+        loadAuditLogs().catch((error) => {
+            groups.innerHTML = `<div class="user-management-empty audit-empty-state">${escapeHtml(error.message)}</div>`;
+        });
+    }
+
+    function renderSettingsConsole(root) {
+        const panel = root.querySelector('.feature-settings-console');
+        if (!panel || root.dataset.settingsConsoleInstalled) return;
+        root.dataset.settingsConsoleInstalled = 'true';
+
+        function applySettingsTheme() {
+            const themeHref = document.getElementById('theme-style')?.getAttribute('href') || '';
+            const isLight = themeHref.includes('light-theme') || document.body.dataset.theme === 'light' || localStorage.getItem('theme') === 'light';
+            const titleColor = isLight ? '#0f172a' : '#dbeafe';
+            const subtitleColor = isLight ? '#164e63' : '#94a3b8';
+            const iconColor = isLight ? '#0e7490' : '#22c1dc';
+
+            root.querySelectorAll('.main-header .header-left h1, .feature-settings-console .feature-panel-header h2').forEach((node) => {
+                node.style.setProperty('color', titleColor, 'important');
+                node.style.setProperty('-webkit-text-fill-color', titleColor, 'important');
+                node.style.setProperty('opacity', '1', 'important');
+                node.style.setProperty('text-shadow', 'none', 'important');
+                node.style.setProperty('font-weight', '900', 'important');
+            });
+
+            root.querySelectorAll('.main-header .header-left h1 i, .feature-settings-console .feature-panel-header h2 i').forEach((icon) => {
+                icon.style.setProperty('color', iconColor, 'important');
+            });
+
+            root.querySelectorAll('.main-header .subtitle, .feature-settings-console .feature-panel-header p').forEach((node) => {
+                node.style.setProperty('color', subtitleColor, 'important');
+                node.style.setProperty('-webkit-text-fill-color', subtitleColor, 'important');
+                node.style.setProperty('opacity', '1', 'important');
+            });
+        }
+
+        const escapeHtml = (value) => String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+
+        if (!isAdminUser()) {
+            panel.innerHTML = `
+                <div class="feature-panel-header">
+                    <div>
+                        <h2><i class="fas fa-cogs"></i> Settings</h2>
+                        <p>Admin-only access. Ask an administrator to update SOC controls.</p>
+                    </div>
+                </div>
+                <div class="user-management-empty audit-empty-state">You do not have permission to view settings.</div>
+            `;
+            return;
+        }
+
+        const defaults = {
+            generalSettings: {
+                theme: 'dark',
+                autoRefreshEnabled: true,
+                refreshIntervalSeconds: 30
+            },
+            alertConfig: {
+                failedLoginThreshold: 5,
+                portScanThreshold: 10,
+                ddosThreshold: 1000
+            },
+            incidentConfig: {
+                createIncidentAfter: 3,
+                severityEscalationEnabled: true
+            },
+            aiSettings: {
+                analysisEnabled: true,
+                autoGenerateRecommendations: true
+            },
+            notificationSettings: {
+                emailNotifications: true,
+                criticalAlertNotifications: true,
+                incidentAssignmentNotifications: true
+            }
+        };
+
+        let originalSettings = null;
+        const SETTINGS_CACHE_KEY = 'microsocSystemSettingsCache';
+        let statusState = {
+            backend: 'loading',
+            database: 'loading',
+            websocket: 'loading',
+            ai: 'loading'
+        };
+        let draftSettings = JSON.parse(JSON.stringify(defaults));
+
+        function getCachedSettings() {
+            try {
+                const cached = JSON.parse(localStorage.getItem(SETTINGS_CACHE_KEY) || 'null');
+                return cached && typeof cached === 'object' ? cached : null;
+            } catch (error) {
+                return null;
+            }
+        }
+
+        function cacheSettings(settings) {
+            if (!settings) return;
+            localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(settings));
+        }
+
+        panel.innerHTML = `
+            <div class="settings-inline-intro">
+                <p>General settings, alert configuration, incident automation, AI, notifications, and live system status.</p>
+            </div>
+
+            <div class="settings-summary-grid" data-settings-summary></div>
+
+            <div class="settings-grid">
+                <section class="settings-card settings-card-wide">
+                    <div class="settings-card-header">
+                        <h3><i class="fas fa-sliders-h"></i> 1. General Settings</h3>
+                        <p>Theme and dashboard refresh behavior.</p>
+                    </div>
+                    <div class="settings-fields" data-settings-general></div>
+                </section>
+
+                <section class="settings-card settings-card-wide">
+                    <div class="settings-card-header">
+                        <h3><i class="fas fa-bell"></i> 2. Alert Configuration</h3>
+                        <p>Thresholds that map directly to your detection architecture.</p>
+                    </div>
+                    <div class="settings-fields" data-settings-alerts></div>
+                </section>
+
+                <section class="settings-card settings-card-wide">
+                    <div class="settings-card-header">
+                        <h3><i class="fas fa-sitemap"></i> 3. Incident Configuration</h3>
+                        <p>Rules for auto-creating and escalating incidents.</p>
+                    </div>
+                    <div class="settings-fields" data-settings-incidents></div>
+                </section>
+
+                <section class="settings-card settings-card-wide">
+                    <div class="settings-card-header">
+                        <h3><i class="fas fa-robot"></i> 4. AI Settings</h3>
+                        <p>Control how much AI assists the SOC workflow.</p>
+                    </div>
+                    <div class="settings-fields" data-settings-ai></div>
+                </section>
+
+                <section class="settings-card settings-card-wide">
+                    <div class="settings-card-header">
+                        <h3><i class="fas fa-envelope"></i> 5. Notification Settings</h3>
+                        <p>Keep the right people informed at the right time.</p>
+                    </div>
+                    <div class="settings-fields" data-settings-notifications></div>
+                </section>
+
+                <section class="settings-card settings-card-status">
+                    <div class="settings-card-header">
+                        <h3><i class="fas fa-circle-nodes"></i> 6. System Status</h3>
+                        <p>Read-only endpoint checks from the live app.</p>
+                    </div>
+                    <div class="settings-status-grid" data-settings-status>
+                        <div class="settings-status-item"><strong>Backend API</strong><span>Checking...</span></div>
+                        <div class="settings-status-item"><strong>Database</strong><span>Checking...</span></div>
+                        <div class="settings-status-item"><strong>WebSocket</strong><span>Checking...</span></div>
+                        <div class="settings-status-item"><strong>AI Service</strong><span>Checking...</span></div>
+                    </div>
+                </section>
+            </div>
+        `;
+        applySettingsTheme();
+
+        const summary = panel.querySelector('[data-settings-summary]');
+        const generalFields = panel.querySelector('[data-settings-general]');
+        const alertFields = panel.querySelector('[data-settings-alerts]');
+        const incidentFields = panel.querySelector('[data-settings-incidents]');
+        const aiFields = panel.querySelector('[data-settings-ai]');
+        const notificationFields = panel.querySelector('[data-settings-notifications]');
+        const statusGrid = panel.querySelector('[data-settings-status]');
+        const saveButton = root.querySelector('[data-settings-save]');
+        const resetButton = root.querySelector('[data-settings-reset]');
+
+        if (!summary || !generalFields || !alertFields || !incidentFields || !aiFields || !notificationFields || !statusGrid || !saveButton || !resetButton) {
+            return;
+        }
+
+        function setThemePreview(theme) {
+            const normalized = String(theme || 'dark').toLowerCase() === 'light' ? 'light' : 'dark';
+            document.body.dataset.theme = normalized;
+            localStorage.setItem('theme', normalized);
+            const themeStyle = document.getElementById('theme-style');
+            if (themeStyle) {
+                themeStyle.setAttribute('href', `css/${normalized}-theme.css?v=20260623t`);
+            }
+        }
+
+        function renderSummaryView() {
+            summary.innerHTML = [
+                ['Theme', draftSettings.generalSettings.theme === 'light' ? 'Light' : 'Dark', 'fa-palette'],
+                ['Auto Refresh', draftSettings.generalSettings.autoRefreshEnabled ? 'Enabled' : 'Disabled', 'fa-arrows-rotate'],
+                ['Alerts', `${draftSettings.alertConfig.failedLoginThreshold}/${draftSettings.alertConfig.portScanThreshold}/${draftSettings.alertConfig.ddosThreshold}`, 'fa-bell'],
+                ['AI', draftSettings.aiSettings.analysisEnabled ? 'On' : 'Off', 'fa-robot']
+            ].map(([title, value, icon]) => `
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: rgba(6, 182, 212, 0.12); color: var(--soc-cyan)">
+                        <i class="fas ${icon}"></i>
+                    </div>
+                    <div class="stat-info">
+                        <h3>${escapeHtml(title)}</h3>
+                        <div class="stat-value">${escapeHtml(value)}</div>
+                        <div class="stat-change positive">Live</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function radioGroup(path, label, options, help) {
+            const [section, key] = path.split('.');
+            const current = String(draftSettings[section]?.[key] || options[0].value);
+            return `
+                <label class="settings-control">
+                    <div class="settings-control-head">
+                        <span>${escapeHtml(label)}</span>
+                    </div>
+                    <div class="settings-radio-group">
+                        ${options.map((option) => `
+                            <label class="settings-radio ${current === option.value ? 'active' : ''}">
+                                <input type="radio" name="${path}" value="${escapeHtml(option.value)}" ${current === option.value ? 'checked' : ''} data-setting-radio="${path}">
+                                <span>${escapeHtml(option.label)}</span>
+                            </label>
+                        `).join('')}
+                    </div>
+                    <small>${escapeHtml(help)}</small>
+                </label>
+            `;
+        }
+
+        function toggleControl(path, label, help) {
+            const [section, key] = path.split('.');
+            const checked = Boolean(draftSettings[section]?.[key]);
+            return `
+                <label class="settings-toggle">
+                    <div>
+                        <span>${escapeHtml(label)}</span>
+                        <small>${escapeHtml(help)}</small>
+                    </div>
+                    <input type="checkbox" ${checked ? 'checked' : ''} data-setting-toggle="${path}">
+                </label>
+            `;
+        }
+
+        function numberControl(path, label, help, min, max, step = 1) {
+            const [section, key] = path.split('.');
+            const value = Number(draftSettings[section]?.[key] ?? defaults[section]?.[key] ?? min);
+            return `
+                <label class="settings-control">
+                    <div class="settings-control-head">
+                        <span>${escapeHtml(label)}</span>
+                        <strong data-setting-value="${escapeHtml(path)}">${escapeHtml(value)}</strong>
+                    </div>
+                    <input type="number" min="${min}" max="${max}" step="${step}" value="${escapeHtml(value)}" data-setting-number="${path}">
+                    <small>${escapeHtml(help)}</small>
+                </label>
+            `;
+        }
+
+        function renderForms() {
+            generalFields.innerHTML = `
+                ${radioGroup('generalSettings.theme', 'Theme', [
+                    { value: 'dark', label: 'Dark' },
+                    { value: 'light', label: 'Light' }
+                ], 'Theme changes the command center look instantly.')}
+                ${toggleControl('generalSettings.autoRefreshEnabled', 'Auto Refresh', 'Keep live dashboards updating automatically.')}
+                ${numberControl('generalSettings.refreshIntervalSeconds', 'Refresh Interval', 'How often the page refreshes live data.', 5, 300, 5)}
+            `;
+
+            alertFields.innerHTML = `
+                ${numberControl('alertConfig.failedLoginThreshold', 'Failed Login Threshold', 'How many failed logins trigger alerting.', 1, 100, 1)}
+                ${numberControl('alertConfig.portScanThreshold', 'Port Scan Threshold', 'How many scan events trigger alerting.', 1, 1000, 1)}
+                ${numberControl('alertConfig.ddosThreshold', 'DDoS Threshold', 'Traffic spike threshold for DDoS detection.', 10, 100000, 10)}
+                <div class="settings-help-card">
+                    <strong>Detection Rules</strong>
+                    <p>Security logs are always stored, but alerts are created only when these thresholds or immediate-danger rules like SQL Injection/XSS match.</p>
+                </div>
+            `;
+
+            incidentFields.innerHTML = `
+                ${numberControl('incidentConfig.createIncidentAfter', 'Create Incident After', 'How many similar alerts auto-create an incident.', 1, 20, 1)}
+                ${toggleControl('incidentConfig.severityEscalationEnabled', 'Severity Escalation', 'Escalate repeated alerts into incidents automatically.')}
+                <div class="settings-help-card">
+                    <strong>Incident Rules</strong>
+                    <p>Similar alerts are correlated by rule and source. When occurrence count reaches this number, MicroSOC auto-creates or updates an incident.</p>
+                </div>
+            `;
+
+            aiFields.innerHTML = `
+                ${toggleControl('aiSettings.analysisEnabled', 'AI Analysis', 'Enable AI-assisted summaries and triage.')}
+                ${toggleControl('aiSettings.autoGenerateRecommendations', 'Auto Generate Recommendations', 'Let AI generate response suggestions automatically.')}
+            `;
+
+            notificationFields.innerHTML = `
+                ${toggleControl('notificationSettings.emailNotifications', 'Email Notifications', 'Send security updates to email.')}
+                ${toggleControl('notificationSettings.criticalAlertNotifications', 'Critical Alert Notifications', 'Notify on critical detections immediately.')}
+                ${toggleControl('notificationSettings.incidentAssignmentNotifications', 'Incident Assignment Notifications', 'Notify analysts when an incident is assigned to them.')}
+            `;
+        }
+
+        function syncDraftFromInputs() {
+            panel.querySelectorAll('[data-setting-toggle]').forEach((input) => {
+                const [section, key] = input.dataset.settingToggle.split('.');
+                if (!draftSettings[section]) draftSettings[section] = {};
+                draftSettings[section][key] = input.checked;
+            });
+
+            panel.querySelectorAll('[data-setting-number]').forEach((input) => {
+                const [section, key] = input.dataset.settingNumber.split('.');
+                if (!draftSettings[section]) draftSettings[section] = {};
+                draftSettings[section][key] = Number(input.value);
+            });
+
+            panel.querySelectorAll('[data-setting-radio]').forEach((input) => {
+                const [section, key] = input.dataset.settingRadio.split('.');
+                if (!draftSettings[section]) draftSettings[section] = {};
+                if (input.checked) {
+                    draftSettings[section][key] = input.value;
                 }
             });
-            socket.addEventListener('close', () => {
-                state.textContent = 'Feed paused';
-                meta.textContent = 'Refresh to reconnect';
-            });
-        } catch (error) {
-            state.textContent = 'Unavailable';
         }
 
-        panel.querySelector('[data-generate-log]').addEventListener('click', async () => {
-            try {
-                const data = await apiRequest('/logs/generate-mock', {
-                    method: 'POST',
-                    body: JSON.stringify({ count: 1 })
-                });
-                (data.logs || []).forEach(addLog);
-            } catch (error) {
-                meta.textContent = error.message;
+        function setFormValues(settings) {
+            draftSettings = {
+                generalSettings: { ...defaults.generalSettings, ...(settings?.generalSettings || {}) },
+                alertConfig: { ...defaults.alertConfig, ...(settings?.alertConfig || {}) },
+                incidentConfig: { ...defaults.incidentConfig, ...(settings?.incidentConfig || {}) },
+                aiSettings: { ...defaults.aiSettings, ...(settings?.aiSettings || {}) },
+                notificationSettings: { ...defaults.notificationSettings, ...(settings?.notificationSettings || {}) }
+            };
+            renderForms();
+            renderSummaryView();
+        }
+
+        function renderStatus(statusPayload = {}) {
+            const statuses = [
+                {
+                    label: 'Backend API',
+                    ok: statusPayload.backend !== 'down',
+                    detail: statusPayload.backendDetail || 'Connected'
+                },
+                {
+                    label: 'Database',
+                    ok: statusPayload.database !== 'down',
+                    detail: statusPayload.databaseDetail || 'Connected'
+                },
+                {
+                    label: 'WebSocket',
+                    ok: statusPayload.websocket !== 'down',
+                    detail: statusPayload.websocketDetail || 'Connected'
+                },
+                {
+                    label: 'AI Service',
+                    ok: statusPayload.ai !== 'down',
+                    detail: statusPayload.aiDetail || 'Connected'
+                }
+            ];
+
+            statusGrid.innerHTML = statuses.map((item) => `
+                <div class="settings-status-item ${item.ok ? 'online' : 'offline'}">
+                    <strong>${escapeHtml(item.label)}</strong>
+                    <span>${item.ok ? '🟢' : '🔴'} ${escapeHtml(item.detail)}</span>
+                </div>
+            `).join('');
+        }
+
+        async function loadSystemStatus() {
+            const [health, realtime, ai] = await Promise.allSettled([
+                apiRequest('/health'),
+                apiRequest('/realtime/status'),
+                apiRequest('/ai/status')
+            ]);
+
+            statusState = {
+                backend: health.status === 'fulfilled' ? 'up' : 'down',
+                database: health.status === 'fulfilled' && String(health.value.database || '').toLowerCase() === 'connected' ? 'up' : 'down',
+                websocket: realtime.status === 'fulfilled' && realtime.value.success ? 'up' : 'down',
+                ai: ai.status === 'fulfilled' && ai.value.success && ai.value.healthy !== false ? 'up' : 'down',
+                backendDetail: health.status === 'fulfilled' ? 'Connected' : 'Unavailable',
+                databaseDetail: health.status === 'fulfilled' ? String(health.value.database || 'unknown') : 'Unavailable',
+                websocketDetail: realtime.status === 'fulfilled' && realtime.value.success ? 'Connected' : 'Unavailable',
+                aiDetail: ai.status === 'fulfilled' && ai.value.success ? `${ai.value.provider || 'ai'} / ${ai.value.model || 'status'}` : 'Unavailable'
+            };
+
+            renderStatus(statusState);
+        }
+
+        async function loadSettings() {
+            const cached = getCachedSettings();
+            if (cached) {
+                originalSettings = cached;
+                setFormValues(cached);
             }
+
+            const payload = await apiRequest('/settings');
+            const loadedSettings = payload.settings || cached || defaults;
+            originalSettings = loadedSettings;
+            cacheSettings(loadedSettings);
+            setFormValues(loadedSettings);
+            await loadSystemStatus();
+        }
+
+        async function saveSettings() {
+            syncDraftFromInputs();
+            cacheSettings(draftSettings);
+            originalSettings = JSON.parse(JSON.stringify(draftSettings));
+            const payload = await apiRequest('/settings', {
+                method: 'PATCH',
+                body: JSON.stringify(draftSettings)
+            });
+            const savedSettings = payload.settings || draftSettings;
+            originalSettings = savedSettings;
+            cacheSettings(savedSettings);
+            setFormValues(savedSettings);
+            await loadSystemStatus();
+            if (typeof window.showNotification === 'function') {
+                window.showNotification('Settings saved successfully', 'success');
+            }
+        }
+
+        panel.addEventListener('input', (event) => {
+            if (event.target.matches('[data-setting-number]')) {
+                const [section, key] = event.target.dataset.settingNumber.split('.');
+                if (!draftSettings[section]) draftSettings[section] = {};
+                draftSettings[section][key] = Number(event.target.value);
+                const valueNode = panel.querySelector(`[data-setting-value="${section}.${key}"]`);
+                if (valueNode) valueNode.textContent = event.target.value;
+                renderSummaryView();
+            }
+        });
+
+        panel.addEventListener('change', (event) => {
+            if (event.target.matches('[data-setting-toggle]')) {
+                syncDraftFromInputs();
+                renderSummaryView();
+            }
+
+            if (event.target.matches('[data-setting-radio]')) {
+                syncDraftFromInputs();
+                setThemePreview(event.target.value);
+                renderSummaryView();
+            }
+
+            if (event.target.matches('[data-setting-number]')) {
+                syncDraftFromInputs();
+                renderSummaryView();
+            }
+        });
+
+        saveButton.addEventListener('click', () => {
+            saveSettings().catch((error) => {
+                if (typeof window.showNotification === 'function') {
+                    window.showNotification(error.message, 'error');
+                } else {
+                    window.alert(error.message);
+                }
+            });
+        });
+
+        resetButton.addEventListener('click', () => {
+            if (originalSettings) {
+                setFormValues(originalSettings);
+            } else {
+                setFormValues(defaults);
+            }
+        });
+
+        loadSettings().catch((error) => {
+            panel.innerHTML = `
+                <div class="feature-panel-header">
+                    <div>
+                        <h2><i class="fas fa-cogs"></i> Settings</h2>
+                        <p>Could not load settings.</p>
+                    </div>
+                </div>
+                <div class="user-management-empty audit-empty-state">${escapeHtml(error.message)}</div>
+            `;
         });
     }
 
     function renderIncidentConsole(root) {
+        if (root.querySelector('#incidents-table')) {
+            return;
+        }
         const host = findContentHost(root);
         if (root.querySelector('.feature-incident-console')) return;
+        const role = currentUser().role || 'analyst';
+        let currentIncidents = [];
         const panel = document.createElement('section');
         panel.className = 'feature-panel feature-incident-console';
-        panel.innerHTML = `
+        panel.innerHTML = role === 'admin' ? `
             <div class="feature-panel-header">
                 <div>
                     <h2>Incident Management</h2>
-                    <p>Create, assign status, resolve, and track timeline events.</p>
+                    <p>Create, assign, resolve, and track timeline events across the SOC.</p>
                 </div>
             </div>
             <form class="incident-quick-form">
@@ -842,47 +2948,257 @@
                 <button type="submit" class="btn btn-primary"><i class="fas fa-plus"></i> Create</button>
             </form>
             <div class="incident-workbench" data-incident-workbench></div>
+        ` : `
+            <div class="feature-panel-header">
+                <div>
+                    <h2>My Incidents</h2>
+                    <p>Only incidents assigned to you can be updated from this view.</p>
+                </div>
+            </div>
+            <div class="incident-workbench" data-incident-workbench></div>
         `;
         host.prepend(panel);
         const workbench = panel.querySelector('[data-incident-workbench]');
 
+        function loadLocalIncidents() {
+            try {
+                const incidents = JSON.parse(localStorage.getItem('microsocLocalIncidents') || '[]');
+                return Array.isArray(incidents) ? incidents : [];
+            } catch (error) {
+                return [];
+            }
+        }
+
+        function mergeIncidents(backendIncidents = []) {
+            const enrichIncident = (incident) => {
+                const assignedUser = incident.assignedTo && typeof incident.assignedTo === 'object' ? incident.assignedTo : null;
+                return {
+                    ...incident,
+                    assignedToId: assignedUser ? (assignedUser.id || assignedUser._id || '') : (incident.assignedToId || ''),
+                    assignedToLabel: assignedUser
+                        ? `${assignedUser.name || ''}${assignedUser.name && assignedUser.email ? ' · ' : ''}${assignedUser.email || ''}`.trim() || assignedUser.name || assignedUser.email
+                        : (incident.assignedToLabel || incident.assignedTo || '')
+                };
+            };
+            const merged = backendIncidents.map(enrichIncident);
+            const seen = new Set(backendIncidents.map((incident) => String(incident._id || incident.id)));
+            loadLocalIncidents().map(enrichIncident).forEach((incident) => {
+                const key = String(incident._id || incident.id);
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    merged.push(incident);
+                }
+            });
+            return merged.sort((a, b) => new Date(b.createdAt || b.updatedAt || 0) - new Date(a.createdAt || a.updatedAt || 0));
+        }
+
+        let assignableUsersCache = [];
+
+        async function loadAssignableUsers() {
+            if (assignableUsersCache.length) {
+                return assignableUsersCache;
+            }
+
+            const payload = await apiRequest('/users');
+            assignableUsersCache = (payload.users || [])
+                .filter(user => user && user.role !== 'viewer' && user.isActive !== false && user.approvalStatus === 'approved')
+                .sort((a, b) => {
+                    if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
+                    return String(a.name || a.email || '').localeCompare(String(b.name || b.email || ''));
+                });
+            return assignableUsersCache;
+        }
+
+        function ensureAssignModal() {
+            let modal = document.getElementById('incident-assign-modal');
+            if (modal) return modal;
+
+            modal = document.createElement('div');
+            modal.id = 'incident-assign-modal';
+            modal.className = 'modal hidden';
+            modal.innerHTML = `
+                <div class="modal-content modal-lg">
+                    <div class="modal-header">
+                        <h3><i class="fas fa-user-plus"></i> Assign Incident</h3>
+                        <button class="close-modal" type="button" data-close-assign>&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="timeline-incident-summary" data-assign-summary style="margin-bottom:16px;"></div>
+                        <div class="form-group">
+                            <label for="incident-assign-user">Assign to</label>
+                            <select id="incident-assign-user">
+                                <option value="">Loading users...</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="incident-assign-note">Note</label>
+                            <textarea id="incident-assign-note" rows="4" placeholder="Optional note for the timeline"></textarea>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-outline" type="button" data-close-assign>Cancel</button>
+                        <button class="btn btn-primary" type="button" data-submit-assign>
+                            <i class="fas fa-user-check"></i> Save Assignment
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            modal.addEventListener('click', (event) => {
+                if (event.target === modal || event.target.closest('[data-close-assign]')) {
+                    closeAssignModal();
+                    return;
+                }
+                if (event.target.closest('[data-submit-assign]')) {
+                    submitAssignModal().catch((error) => {
+                        console.error('Incident assignment failed:', error);
+                        if (typeof window.showNotification === 'function') {
+                            window.showNotification(error.message || 'Incident assignment failed', 'error');
+                        } else {
+                            window.alert(error.message || 'Incident assignment failed');
+                        }
+                    });
+                }
+            });
+            return modal;
+        }
+
+        function renderAssignSummary(incident) {
+            const summary = document.querySelector('[data-assign-summary]');
+            if (!summary) return;
+            summary.innerHTML = `
+                <h4>${escapeHtml(incident.title || 'Incident')}</h4>
+                <p>${escapeHtml(incident.description || 'No description')}</p>
+                <div class="timeline-incident-meta">
+                    <span class="badge badge-danger">${escapeHtml(String(incident.severity || 'medium').toUpperCase())}</span>
+                    <span class="status-badge status-${escapeHtml(incident.status || 'open')}">${escapeHtml(String(incident.status || 'open').replace('_', ' ').toUpperCase())}</span>
+                    <span>Current assignee: ${escapeHtml(incident.assignedToLabel || incident.assignedTo || 'Unassigned')}</span>
+                </div>
+            `;
+        }
+
+        async function openAssignModal(incidentId) {
+            const incident = currentIncidents.find(item => String(item._id || item.id) === String(incidentId));
+            if (!incident) return;
+
+            const modal = ensureAssignModal();
+            modal.dataset.incidentId = String(incidentId);
+            renderAssignSummary(incident);
+
+            const select = document.getElementById('incident-assign-user');
+            const note = document.getElementById('incident-assign-note');
+            if (select) {
+                select.disabled = true;
+                select.innerHTML = '<option value="">Loading users...</option>';
+            }
+            if (note) note.value = '';
+
+            try {
+                const users = await loadAssignableUsers();
+                if (select) {
+                    select.innerHTML = '<option value="">Unassigned</option>';
+                    users.forEach((user) => {
+                        const option = document.createElement('option');
+                        option.value = user.id || user._id;
+                        option.textContent = `${user.name || user.email} (${String(user.role || '').toUpperCase()})`;
+                        if (
+                            String(incident.assignedToId || '') === String(user.id || user._id) ||
+                            String(incident.assignedToLabel || '').toLowerCase().includes(String(user.email || user.name || '').toLowerCase())
+                        ) {
+                            option.selected = true;
+                        }
+                        select.appendChild(option);
+                    });
+                    select.disabled = false;
+                }
+            } catch (error) {
+                console.error('Failed to load users for assignment:', error);
+                if (select) {
+                    select.innerHTML = '<option value="">Unassigned</option><option value="" disabled>Unable to load users</option>';
+                    select.disabled = false;
+                }
+            }
+
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeAssignModal() {
+            const modal = document.getElementById('incident-assign-modal');
+            if (modal) {
+                delete modal.dataset.incidentId;
+                modal.classList.add('hidden');
+            }
+            document.body.style.overflow = '';
+        }
+
+        async function submitAssignModal() {
+            const modal = document.getElementById('incident-assign-modal');
+            const incidentId = modal?.dataset?.incidentId;
+            if (!incidentId) return;
+
+            const userId = document.getElementById('incident-assign-user')?.value || '';
+            const note = document.getElementById('incident-assign-note')?.value?.trim() || '';
+
+            await apiRequest(`/incidents/${incidentId}/assign`, {
+                method: 'PUT',
+                body: JSON.stringify({
+                    userId: userId || null,
+                    note: note || undefined
+                })
+            });
+
+            closeAssignModal();
+            assignableUsersCache = [];
+            loadIncidents();
+        }
+
         async function loadIncidents() {
-            const data = await apiRequest('/incidents?limit=8');
-            workbench.innerHTML = (data.incidents || []).map(incident => `
+            const query = '/incidents?limit=8';
+            const data = await apiRequest(query);
+            const incidents = mergeIncidents(data.incidents || []);
+            currentIncidents = incidents;
+            workbench.innerHTML = incidents.map(incident => `
                 <article class="incident-ticket ${incident.severity}">
                     <div>
                         <strong>${incident.title}</strong>
                         <span>${incident.status.replace('_', ' ')} · ${incident.severity}</span>
                     </div>
                     <div class="ticket-actions">
-                        <button type="button" data-status="${incident._id}:in_progress">In Progress</button>
-                        <button type="button" data-status="${incident._id}:resolved">Resolve</button>
-                        <button type="button" data-timeline="${incident._id}">Timeline</button>
+                        <button type="button" data-status="${incident._id || incident.id}:in_progress">In Progress</button>
+                        <button type="button" data-status="${incident._id || incident.id}:resolved">Resolve</button>
+                        <button type="button" data-timeline="${incident._id || incident.id}">Timeline</button>
+                        ${role === 'admin' ? '<button type="button" data-assign-incident>Assign</button>' : ''}
+                        ${role === 'admin' ? '<button type="button" data-admin-incident="edit">Edit</button>' : '<button type="button" data-admin-incident="note">Add Note</button>'}
                     </div>
                 </article>
             `).join('') || '<p class="empty-state">No incidents yet.</p>';
         }
 
-        panel.querySelector('form').addEventListener('submit', async (event) => {
-            event.preventDefault();
-            const form = new FormData(event.currentTarget);
-            await apiRequest('/incidents', {
-                method: 'POST',
-                body: JSON.stringify({
-                    title: form.get('title'),
-                    description: `${form.get('severity')} incident created from analyst console`,
-                    severity: form.get('severity'),
-                    sourceIP: form.get('sourceIP') || undefined,
-                    category: 'other'
-                })
+        if (role === 'admin') {
+            panel.querySelector('form').addEventListener('submit', async (event) => {
+                event.preventDefault();
+                const form = new FormData(event.currentTarget);
+                await apiRequest('/incidents', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        title: form.get('title'),
+                        description: `${form.get('severity')} incident created from analyst console`,
+                        severity: form.get('severity'),
+                        sourceIP: form.get('sourceIP') || undefined,
+                        category: 'other'
+                    })
+                });
+                event.currentTarget.reset();
+                loadIncidents();
             });
-            event.currentTarget.reset();
-            loadIncidents();
-        });
+        }
 
         workbench.addEventListener('click', async (event) => {
             const statusButton = event.target.closest('[data-status]');
             const timelineButton = event.target.closest('[data-timeline]');
+            const assignButton = event.target.closest('[data-assign-incident]');
+            const adminButton = event.target.closest('[data-admin-incident]');
             if (statusButton) {
                 const [id, status] = statusButton.dataset.status.split(':');
                 await apiRequest(`/incidents/${id}/status`, {
@@ -891,12 +3207,38 @@
                 });
                 loadIncidents();
             }
+            if (assignButton && role === 'admin') {
+                const ticket = event.target.closest('.incident-ticket');
+                const statusValue = ticket?.querySelector('[data-status]')?.dataset.status || '';
+                const incidentId = statusValue.split(':')[0];
+                if (incidentId) {
+                    openAssignModal(incidentId);
+                }
+            }
             if (timelineButton) {
                 await apiRequest(`/incidents/${timelineButton.dataset.timeline}/timeline`, {
                     method: 'POST',
                     body: JSON.stringify({ action: 'Analyst review', note: 'Timeline checkpoint added from console' })
                 });
                 loadIncidents();
+            }
+            if (adminButton) {
+                if (role === 'admin') {
+                    window.alert('Edit incident in the incidents tab.');
+                } else {
+                    const note = window.prompt('Add a note for this incident:', 'Analyst note');
+                    if (note) {
+                        const activeTicket = event.target.closest('.incident-ticket');
+                        const incidentId = activeTicket?.querySelector('[data-status]')?.dataset.status?.split(':')?.[0];
+                        if (incidentId) {
+                            await apiRequest(`/incidents/${incidentId}/timeline`, {
+                                method: 'POST',
+                                body: JSON.stringify({ action: 'Analyst note', note })
+                            });
+                            loadIncidents();
+                        }
+                    }
+                }
             }
         });
 
@@ -989,17 +3331,75 @@
                 BR: [36, 70], Brazil: [36, 70], DE: [52, 35], Germany: [52, 35],
                 JP: [82, 46], Japan: [82, 46], KR: [79, 43], UK: [48, 33]
             };
-            const attackers = realtime.realtimeData?.topAttackers || [];
+            const countryDisplayNames = {
+                US: 'United States',
+                RU: 'Russia',
+                CN: 'China',
+                IN: 'India',
+                BR: 'Brazil',
+                DE: 'Germany',
+                JP: 'Japan',
+                KR: 'South Korea',
+                UK: 'United Kingdom'
+            };
+            const countryAliases = {
+                'united states': 'US',
+                'united states of america': 'US',
+                usa: 'US',
+                'u.s.a.': 'US',
+                america: 'US',
+                germany: 'DE',
+                india: 'IN',
+                china: 'CN',
+                russia: 'RU',
+                'russian federation': 'RU',
+                brazil: 'BR',
+                japan: 'JP',
+                korea: 'KR',
+                'south korea': 'KR',
+                'united kingdom': 'UK',
+                uk: 'UK'
+            };
+            const countryAttacks = realtime.realtimeData?.countryAttackMap || [];
+            const attackers = countryAttacks.length ? countryAttacks : (realtime.realtimeData?.topAttackers || []);
             const maxCount = Math.max(...attackers.map(item => item.count || item.attacks || 1), 1);
+            const normalizeCountry = (value) => {
+                const raw = String(value || '').trim();
+                if (!raw) return 'Unknown';
+                return countryAliases[raw.toLowerCase()] || raw.toUpperCase();
+            };
+            const getCountryDisplayName = (value) => {
+                const code = normalizeCountry(value);
+                if (code === 'Unknown') return 'Unknown';
+                return countryDisplayNames[code] || value || code;
+            };
             map.innerHTML = attackers.length
                 ? attackers.map((attacker, index) => {
-                    const country = attacker.country || 'Unknown';
-                    const [x, y] = coordinates[country] || [20 + ((index * 17) % 60), 28 + ((index * 13) % 44)];
+                    const countryCode = normalizeCountry(attacker.country || attacker._id || attacker.ip);
+                    const countryName = getCountryDisplayName(attacker.country || attacker._id || attacker.ip);
+                    const [x, y] = coordinates[countryCode] || coordinates[countryCode.toUpperCase()] || [20 + ((index * 17) % 60), 28 + ((index * 13) % 44)];
                     const count = attacker.count || attacker.attacks || 0;
                     const sev = count >= maxCount * 0.75 ? 'critical' : count >= maxCount * 0.5 ? 'high' : count >= maxCount * 0.25 ? 'medium' : 'low';
-                    return `<button class="map-pip ${sev}" style="left:${x}%;top:${y}%;" title="${attacker.ip || attacker._id} · ${country} · ${count} attacks">${country.slice(0, 2).toUpperCase()}</button>`;
+                    const label = countryCode === 'Unknown' ? 'UN' : countryCode.slice(0, 2).toUpperCase();
+                    return `<button class="map-pip ${sev}" style="left:${x}%;top:${y}%;" title="${countryName} · ${count} attacks"><span>${label}</span><small>${count}</small></button>`;
                 }).join('')
-                : '<div class="empty-state">No source IP activity yet.</div>';
+                : '<div class="empty-state">No country activity yet.</div>';
+
+            const countrySummary = attackers.length
+                ? `
+                    <div class="attack-map-summary">
+                        <div class="attack-map-summary-title">Country breakdown</div>
+                        <div class="attack-map-summary-list">
+                            ${attackers.map((attacker) => {
+                                const countryName = getCountryDisplayName(attacker.country || attacker._id || attacker.ip);
+                                const count = attacker.count || attacker.attacks || 0;
+                                return `<div class="attack-map-summary-item"><span>${countryName}</span><strong>${count}</strong></div>`;
+                            }).join('')}
+                        </div>
+                    </div>
+                `
+                : '';
+            map.insertAdjacentHTML('beforeend', countrySummary);
 
             const hourlyTrend = stats.stats?.hourlyTrend?.length
                 ? stats.stats.hourlyTrend

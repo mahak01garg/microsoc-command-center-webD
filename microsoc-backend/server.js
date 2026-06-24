@@ -4,7 +4,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const http = require('http');
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const realtimeHub = require('./utils/realtimeHub');
 
 // =====================
@@ -46,7 +47,7 @@ app.use(cors({
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
@@ -78,6 +79,7 @@ const connectDB = async () => {
     console.log('✅ MongoDB connected successfully');
 
     const User = require('./models/User');
+    const AuditLog = require('./models/AuditLog');
     await User.syncAdminUsers();
 
   } catch (error) {
@@ -92,6 +94,10 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/logs', require('./routes/logs'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/incidents', require('./routes/incidents'));
+app.use('/api/alerts', require('./routes/alerts'));
+app.use('/api/users', require('./routes/users'));
+app.use('/api/audit-logs', require('./routes/auditLogs'));
+app.use('/api/settings', require('./routes/settings'));
 app.use('/api/ai', require('./routes/ai'));
 app.use('/api/analytics', require('./routes/analytics'));
 app.use('/api/threat-intel', require('./routes/threatIntel'));

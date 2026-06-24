@@ -123,6 +123,9 @@ LogSchema.statics.getStatistics = async function(timeRange = '24h') {
   let startDate;
   
   switch(timeRange) {
+    case 'all':
+      startDate = null;
+      break;
     case '1h':
       startDate = new Date(now.getTime() - (60 * 60 * 1000));
       break;
@@ -139,45 +142,70 @@ LogSchema.statics.getStatistics = async function(timeRange = '24h') {
       startDate = new Date(now.getTime() - (24 * 60 * 60 * 1000));
   }
   
-  const stats = await this.aggregate([
-    {
+  const pipeline = [];
+
+  if (startDate) {
+    pipeline.push({
       $match: {
         timestamp: { $gte: startDate }
       }
-    },
-    {
-      $facet: {
-        totalLogs: [{ $count: 'count' }],
-        severityDistribution: [
-          { $group: { _id: '$severity', count: { $sum: 1 } } }
-        ],
-        attackTypeDistribution: [
-          { $group: { _id: '$attackType', count: { $sum: 1 } } }
-        ],
-        blockedAttacks: [
-          { $match: { isBlocked: true } },
-          { $count: 'count' }
-        ],
-        topAttackers: [
-          { $group: { _id: '$sourceIP', count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-          { $limit: 10 }
-        ],
-        hourlyTrend: [
-          {
-            $group: {
-              _id: {
-                hour: { $hour: '$timestamp' },
-                day: { $dayOfMonth: '$timestamp' }
-              },
-              count: { $sum: 1 }
-            }
-          },
-          { $sort: { '_id.day': 1, '_id.hour': 1 } }
-        ]
-      }
+    });
+  }
+
+  pipeline.push({
+    $facet: {
+      totalLogs: [{ $count: 'count' }],
+      severityDistribution: [
+        { $group: { _id: '$severity', count: { $sum: 1 } } }
+      ],
+      attackTypeDistribution: [
+        { $group: { _id: '$attackType', count: { $sum: 1 } } }
+      ],
+      countryDistribution: [
+        {
+          $group: {
+            _id: {
+              $cond: [
+                {
+                  $or: [
+                    { $eq: ['$country', null] },
+                    { $eq: ['$country', ''] }
+                  ]
+                },
+                'Unknown',
+                '$country'
+              ]
+            },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { count: -1, _id: 1 } }
+      ],
+      blockedAttacks: [
+        { $match: { isBlocked: true } },
+        { $count: 'count' }
+      ],
+      topAttackers: [
+        { $group: { _id: '$sourceIP', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 10 }
+      ],
+      hourlyTrend: [
+        {
+          $group: {
+            _id: {
+              hour: { $hour: '$timestamp' },
+              day: { $dayOfMonth: '$timestamp' }
+            },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { '_id.day': 1, '_id.hour': 1 } }
+      ]
     }
-  ]);
+  });
+
+  const stats = await this.aggregate(pipeline);
   
   return stats[0];
 };

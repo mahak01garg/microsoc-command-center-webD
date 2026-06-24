@@ -16,6 +16,18 @@ let analyticsData = {
 
 const LOG_STORAGE_KEY = 'microsocSecurityLogs';
 
+function getCurrentUserRole() {
+    try {
+        return JSON.parse(localStorage.getItem('user') || '{}').role || 'analyst';
+    } catch (error) {
+        return 'analyst';
+    }
+}
+
+function isAdminUser() {
+    return getCurrentUserRole() === 'admin';
+}
+
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'https://microsoc-backend.onrender.com/api';
 }
@@ -90,9 +102,26 @@ function initAnalytics() {
     
     // Update stats
     updateAnalyticsStats();
+    syncAnalyticsRoleUi();
 
     window.addEventListener('microsoc:logs-updated', updateAnalytics);
 
+}
+
+function syncAnalyticsRoleUi() {
+    const adminOnlyButtons = [
+        'button[onclick*="updateAnalytics"]',
+        'button[onclick*="exportAnalytics"]',
+        'button[onclick*="runPatternAnalysis"]'
+    ];
+
+    if (isAdminUser()) return;
+
+    adminOnlyButtons.forEach(selector => {
+        document.querySelectorAll(selector).forEach(button => {
+            button.style.display = 'none';
+        });
+    });
 }
 
 // Load Analytics Data
@@ -641,8 +670,40 @@ function renderAIInsights(insights) {
     `).join('');
 }
 
+function renderAIInsightsLoading() {
+    const container = document.getElementById('insights-container');
+    if (!container) return;
+
+    container.innerHTML = `
+        <div class="ai-loading-state analytics-ai-loading">
+            <div class="ai-loading-orb"><i class="fas fa-chart-line"></i></div>
+            <h4>AI is generating SOC report...</h4>
+            <p>MicroSOC AI is reviewing alerts, logs, attacker distribution, and risk signals.</p>
+            <div class="ai-loading-steps">
+                <span>Reading analytics</span>
+                <span>Correlating logs</span>
+                <span>Writing SOC insights</span>
+            </div>
+        </div>
+    `;
+}
+
+function renderAIInsightsError(message) {
+    const container = document.getElementById('insights-container');
+    if (!container) return;
+
+    container.innerHTML = `
+        <div class="ai-loading-state ai-error-state analytics-ai-loading">
+            <div class="ai-loading-orb"><i class="fas fa-triangle-exclamation"></i></div>
+            <h4>AI SOC report failed</h4>
+            <p>${escapeHtml(message || 'Please check backend login/session and try again.')}</p>
+        </div>
+    `;
+}
+
 // Generate AI Insights
 async function generateAIInsights() {
+    renderAIInsightsLoading();
     showNotification('Generating AI SOC report...', 'info');
 
     try {
@@ -681,12 +742,17 @@ async function generateAIInsights() {
         showNotification('AI SOC report generated', 'success');
     } catch (error) {
         console.error('AI insights failed:', error);
+        renderAIInsightsError(error.message || 'AI report failed. Please check backend login/session.');
         showNotification('AI report failed. Please check backend login/session.', 'error');
     }
 }
 
 // Update Analytics
 function updateAnalytics() {
+    if (!isAdminUser()) {
+        showNotification('Analytics is view-only for analysts.', 'warning');
+        return;
+    }
     loadAnalyticsData();
     if (attackDistributionChart instanceof Chart) {
         attackDistributionChart.data = analyticsData.attackDistribution;
@@ -708,6 +774,10 @@ function updateAnalytics() {
 
 // Run Pattern Analysis
 function runPatternAnalysis() {
+    if (!isAdminUser()) {
+        showNotification('Pattern analysis is available for admins only.', 'warning');
+        return;
+    }
     loadPatterns();
     loadAnomalies();
     showNotification('Pattern analysis recalculated from stored logs', 'success');
@@ -715,6 +785,10 @@ function runPatternAnalysis() {
 
 // Export Analytics
 function exportAnalytics() {
+    if (!isAdminUser()) {
+        showNotification('Only admins can export analytics.', 'warning');
+        return;
+    }
     const exportData = {
         timestamp: new Date().toISOString(),
         analytics: analyticsData,

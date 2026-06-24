@@ -1,6 +1,7 @@
 const Log = require('../models/Log');
 const Incident = require('../models/Incident');
 const Analytics = require('../models/Analytics');
+const Alert = require('../models/Alert');
 
 // @desc    Get dashboard statistics
 // @route   GET /api/dashboard/stats
@@ -63,20 +64,48 @@ exports.getDashboardStats = async (req, res) => {
       ]).then(result => result[0]?.count || 0)
     ]);
 
-    // Calculate percentages
+    const logStats24h = await Log.getStatistics('24h');
+    const severityDistribution = Array.isArray(logStats24h?.severityDistribution)
+      ? logStats24h.severityDistribution
+      : [];
+    const criticalLogs24h = severityDistribution.find(item => item._id === 'critical')?.count || 0;
+    const highLogs24h = severityDistribution.find(item => item._id === 'high')?.count || 0;
+    const mediumLogs24h = severityDistribution.find(item => item._id === 'medium')?.count || 0;
+    const alertCount24h = await Alert.countDocuments({
+      deletedAt: { $exists: false },
+      lastSeen: { $gte: twentyFourHoursAgo }
+    });
     const blockedPercentage = totalLogs24h > 0 
       ? Math.round((blockedAttacks24h / totalLogs24h) * 100)
       : 0;
+
+    const totalThreatSignals = totalLogs24h + alertCount24h + activeIncidents;
+    const totalSeveritySignals = Math.max(1, criticalLogs24h + highLogs24h + mediumLogs24h);
+    const criticalRatio = criticalLogs24h / totalSeveritySignals;
+    const highRatio = highLogs24h / totalSeveritySignals;
+    const mediumRatio = mediumLogs24h / totalSeveritySignals;
+    const logPressure = Math.round(
+      (criticalRatio * 45) +
+      (highRatio * 25) +
+      (mediumRatio * 12)
+    );
+    const responsePressure = Math.min(35, activeIncidents * 5 + criticalIncidents * 8 + Math.round(Math.min(12, alertCount24h * 1.5)));
+    const resilienceBonus = Math.min(15, Math.round(blockedPercentage / 7)) + Math.min(10, Math.round(uniqueSources24h / 20));
+    const baseScore = 92;
 
     const logsChange = totalLogs7d > 0
       ? Math.round(((totalLogs24h - (totalLogs7d / 7)) / (totalLogs7d / 7)) * 100)
       : 0;
 const securityScore = Math.max(
-  0,
-  100 -
-  (activeIncidents * 2) -
-  (criticalIncidents * 5) +
-  Math.floor(blockedPercentage / 5)
+  totalThreatSignals > 0 ? 20 : 45,
+  Math.min(
+    100,
+    baseScore
+      - logPressure
+      - responsePressure
+      + resilienceBonus
+      + (totalThreatSignals > 0 ? 4 : 0)
+  )
 );
 
 
@@ -198,6 +227,23 @@ exports.getRealtimeData = async (req, res) => {
       { $limit: 5 }
     ]);
 
+    const countryAttackMap = await Log.aggregate([
+      {
+        $match: {
+          timestamp: { $gte: todayStart },
+          country: { $exists: true, $nin: [null, ''] }
+        }
+      },
+      {
+        $group: {
+          _id: '$country',
+          count: { $sum: 1 },
+          lastSeen: { $max: '$timestamp' }
+        }
+      },
+      { $sort: { count: -1, lastSeen: -1 } }
+    ]);
+
     // Format attack map data
     const attackMapData = topAttackers.map(attacker => ({
       ip: attacker._id,
@@ -206,12 +252,19 @@ exports.getRealtimeData = async (req, res) => {
       lastSeen: attacker.lastSeen
     }));
 
+    const countryAttackMapData = countryAttackMap.map(country => ({
+      country: country._id,
+      count: country.count,
+      lastSeen: country.lastSeen
+    }));
+
     res.status(200).json({
       success: true,
       realtimeData: {
         recentLogs,
         recentIncidents,
         topAttackers: attackMapData,
+        countryAttackMap: countryAttackMapData,
         lastUpdated: new Date()
       }
     });
@@ -300,79 +353,41 @@ exports.getRecentActivity = async (req, res) => {
 exports.getRecentAlerts = async (req, res) => {
   try {
     const twentyFourHoursAgo = new Date(Date.now() - (24 * 60 * 60 * 1000));
-
-    // Get critical and high severity logs
-    const criticalLogs = await Log.find({
-      timestamp: { $gte: twentyFourHoursAgo },
-      severity: { $in: ['critical', 'high'] }
+    const alerts = await Alert.find({
+      deletedAt: { $exists: false },
+      lastSeen: { $gte: twentyFourHoursAgo }
     })
-    .sort({ timestamp: -1 })
-    .limit(10)
-    .select('timestamp attackType sourceIP severity description isBlocked country');
+      .sort({ severity: 1, lastSeen: -1 })
+      .limit(15)
+      .populate('incident', 'title status severity')
+      .populate('log', 'timestamp attackType sourceIP severity description isBlocked country');
 
-    // Get open critical incidents
-    const criticalIncidents = await Incident.find({
-      severity: 'critical',
-      status: { $in: ['open', 'in_progress'] }
-    })
-    .sort({ updatedAt: -1 })
-    .limit(5)
-    .populate('assignedTo', 'name')
-    .select('title description severity status assignedTo createdAt');
+    const formattedAlerts = alerts.map(alert => ({
+      type: alert.incident ? 'incident' : 'log',
+      id: alert._id,
+      timestamp: alert.lastSeen || alert.createdAt,
+      title: alert.title,
+      description: alert.description,
+      severity: alert.severity,
+      source: alert.sourceIP,
+      country: alert.log?.country,
+      isBlocked: alert.log?.isBlocked,
+      status: alert.status,
+      assignedTo: alert.incident?.assignedTo?.name,
+      requiresAction: ['new', 'in_progress'].includes(alert.status),
+      occurrenceCount: alert.occurrenceCount,
+      attackType: alert.attackType,
+      ruleId: alert.ruleId
+    }));
 
-    // Format alerts
-    const alerts = [];
-
-    // Add log alerts
-    criticalLogs.forEach(log => {
-      alerts.push({
-        type: 'log',
-        id: log._id,
-        timestamp: log.timestamp,
-        title: `${log.severity.toUpperCase()}: ${log.attackType}`,
-        description: log.description,
-        severity: log.severity,
-        source: log.sourceIP,
-        country: log.country,
-        isBlocked: log.isBlocked,
-        requiresAction: !log.isBlocked && log.severity === 'critical'
-      });
-    });
-
-    // Add incident alerts
-    criticalIncidents.forEach(incident => {
-      alerts.push({
-        type: 'incident',
-        id: incident._id,
-        timestamp: incident.createdAt,
-        title: `CRITICAL INCIDENT: ${incident.title}`,
-        description: incident.description,
-        severity: incident.severity,
-        status: incident.status,
-        assignedTo: incident.assignedTo?.name,
-        requiresAction: incident.status === 'open'
-      });
-    });
-
-    // Sort by timestamp and severity
-    alerts.sort((a, b) => {
-      // Critical first
-      if (a.severity === 'critical' && b.severity !== 'critical') return -1;
-      if (b.severity === 'critical' && a.severity !== 'critical') return 1;
-      
-      // Then by timestamp
-      return b.timestamp - a.timestamp;
-    });
-
-    // Count alerts requiring action
-    const alertsRequiringAction = alerts.filter(alert => alert.requiresAction).length;
+    const alertsRequiringAction = formattedAlerts.filter(alert => alert.requiresAction).length;
 
     res.status(200).json({
       success: true,
-      alerts: alerts.slice(0, 15), // Limit to 15 alerts
+      alerts: formattedAlerts,
       summary: {
-        total: alerts.length,
-        critical: alerts.filter(a => a.severity === 'critical').length,
+        total: formattedAlerts.length,
+        critical: formattedAlerts.filter(a => a.severity === 'critical').length,
         requiringAction: alertsRequiringAction,
         lastUpdated: new Date()
       }

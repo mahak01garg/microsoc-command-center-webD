@@ -10,15 +10,19 @@ let liveStreamFirstTimer = null;
 let liveRenderTimer = null;
 let pendingLiveLogs = [];
 let lastLiveNotificationAt = 0;
+let autoConvertedLiveLogIds = new Set();
 let currentPage = 1;
 let itemsPerPage = 25;
 let totalPages = 1;
 const LOG_STORAGE_KEY = 'microsocSecurityLogs';
+const DELETED_LOG_IDS_KEY = 'microsocDeletedLogIds';
 const MAX_STORED_LOGS = 1000;
 const LIVE_STREAM_INTERVAL_MS = 3000;
 const LIVE_STREAM_FIRST_DELAY_MS = 1200;
 const LIVE_RENDER_DEBOUNCE_MS = 250;
 const LIVE_NOTIFICATION_MIN_GAP_MS = 9000;
+const LIVE_STREAM_STATE_KEY = 'microsocLiveStreamState';
+const LIVE_STREAM_TAB_ID_KEY = 'microsocLiveStreamTabId';
 let logsApiRefreshTimer = null;
 
 function getCurrentUserRole() {
@@ -37,6 +41,147 @@ function canManageLogs() {
     return isAdminUser();
 }
 
+function syncLogRoleUi() {
+    const headerButtonSelectors = [
+        '.log-controls .btn-primary',
+        '.log-controls .btn-danger',
+        '.log-controls button[onclick*="clearLogs"]',
+        '.log-controls button[onclick*="deleteSelectedLogs"]',
+        '.log-controls button[onclick*="exportLogs"]',
+        '.log-controls button[onclick*="exportSelectedLogs"]',
+        '.log-controls button[onclick*="createIncidentFromSelected"]'
+    ];
+
+    headerButtonSelectors.forEach(selector => {
+        document.querySelectorAll(selector).forEach(button => {
+            const label = (button.textContent || '').toLowerCase();
+            const shouldHide = !canManageLogs() && /clear|delete|export|create incident|bulk/i.test(label);
+            if (shouldHide) {
+                button.style.display = 'none';
+            }
+        });
+    });
+
+    const headerTitle = document.querySelector('.main-header .header-left h1');
+    const headerSubtitle = document.querySelector('.main-header .header-left .subtitle');
+    if (headerTitle) {
+        headerTitle.innerHTML = canManageLogs()
+            ? '<i class="fas fa-stream"></i> Security Logs'
+            : '<i class="fas fa-stream"></i> Security Logs';
+    }
+    if (headerSubtitle && !canManageLogs()) {
+        headerSubtitle.textContent = 'View-only access for analysts';
+    }
+
+    ensureSelectedDeleteButton();
+    syncSelectionColumnVisibility();
+    updateSelectedCount();
+}
+
+function ensureSelectedDeleteButton() {
+    const headerActions = document.querySelector('#search-logs')?.closest('.header-actions');
+    if (!headerActions || document.getElementById('selected-delete-btn')) return;
+
+    const button = document.createElement('button');
+    button.id = 'selected-delete-btn';
+    button.type = 'button';
+    button.className = 'btn-icon log-selected-delete';
+    button.title = 'Delete selected logs';
+    button.setAttribute('aria-label', 'Delete selected logs');
+    button.innerHTML = '<i class="fas fa-trash"></i><span class="selected-delete-count">0</span>';
+    button.addEventListener('click', deleteSelectedLogs);
+    headerActions.appendChild(button);
+}
+
+function syncSelectionColumnVisibility() {
+    const selectAll = document.getElementById('select-all');
+    const headerCell = selectAll?.closest('th');
+    const canSelect = canManageLogs();
+
+    if (headerCell) {
+        headerCell.classList.add('log-select-header');
+        headerCell.style.display = canSelect ? '' : 'none';
+    }
+
+    if (selectAll) {
+        selectAll.checked = canSelect ? selectAll.checked : false;
+        selectAll.disabled = !canSelect;
+    }
+
+    if (!canSelect) {
+        selectedLogs.clear();
+        document.querySelectorAll('.log-select-cell').forEach(cell => {
+            cell.style.display = 'none';
+        });
+    }
+}
+
+function getLiveStreamTabId() {
+    let tabId = sessionStorage.getItem(LIVE_STREAM_TAB_ID_KEY);
+    if (!tabId) {
+        tabId = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        sessionStorage.setItem(LIVE_STREAM_TAB_ID_KEY, tabId);
+    }
+    return tabId;
+}
+
+function getLiveStreamState() {
+    try {
+        const state = JSON.parse(localStorage.getItem(LIVE_STREAM_STATE_KEY) || 'null');
+        return state && typeof state === 'object' ? state : { active: false, owner: null, startedAt: null, lastSeenAt: null };
+    } catch (error) {
+        return { active: false, owner: null, startedAt: null, lastSeenAt: null };
+    }
+}
+
+function setLiveStreamState(state) {
+    localStorage.setItem(LIVE_STREAM_STATE_KEY, JSON.stringify({
+        active: Boolean(state.active),
+        owner: state.owner || null,
+        startedAt: state.startedAt || null,
+        lastSeenAt: state.lastSeenAt || new Date().toISOString()
+    }));
+}
+
+function claimLiveStreamOwnership() {
+    const tabId = getLiveStreamTabId();
+    const state = getLiveStreamState();
+    if (!state.active || state.owner === tabId) {
+        setLiveStreamState({
+            active: true,
+            owner: tabId,
+            startedAt: state.startedAt || new Date().toISOString(),
+            lastSeenAt: new Date().toISOString()
+        });
+        return true;
+    }
+    return false;
+}
+
+function releaseLiveStreamOwnership() {
+    const state = getLiveStreamState();
+    const tabId = getLiveStreamTabId();
+    if (state.owner !== tabId) return;
+    setLiveStreamState({
+        active: false,
+        owner: null,
+        startedAt: null,
+        lastSeenAt: new Date().toISOString()
+    });
+}
+
+function syncLiveStreamFromState() {
+    const state = getLiveStreamState();
+    const tabId = getLiveStreamTabId();
+    const shouldRun = Boolean(state.active && state.owner === tabId);
+
+    if (shouldRun && !isLiveStreaming) {
+        startLiveStream({ fromSync: true });
+    } else if (!shouldRun && isLiveStreaming) {
+        pauseLiveStream({ fromSync: true });
+    }
+}
+
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'https://microsoc-backend.onrender.com/api';
 }
@@ -44,14 +189,34 @@ function getApiBaseUrl() {
 function loadStoredLogs() {
     try {
         const stored = JSON.parse(localStorage.getItem(LOG_STORAGE_KEY) || '[]');
-        return Array.isArray(stored) ? stored : [];
+        return filterDeletedLogs(Array.isArray(stored) ? stored : []);
     } catch (error) {
         return [];
     }
 }
 
+function getDeletedLogIds() {
+    try {
+        const ids = JSON.parse(localStorage.getItem(DELETED_LOG_IDS_KEY) || '[]');
+        return new Set(Array.isArray(ids) ? ids.map(String) : []);
+    } catch (error) {
+        return new Set();
+    }
+}
+
+function rememberDeletedLogIds(ids) {
+    const deletedIds = getDeletedLogIds();
+    ids.filter(Boolean).map(String).forEach(id => deletedIds.add(id));
+    localStorage.setItem(DELETED_LOG_IDS_KEY, JSON.stringify(Array.from(deletedIds).slice(-3000)));
+}
+
+function filterDeletedLogs(logs) {
+    const deletedIds = getDeletedLogIds();
+    return (Array.isArray(logs) ? logs : []).filter(log => !deletedIds.has(getLogId(log)));
+}
+
 function saveStoredLogs() {
-    const sortedLogs = [...allLogs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const sortedLogs = filterDeletedLogs([...allLogs]).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     allLogs = sortedLogs;
     localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(sortedLogs.slice(0, MAX_STORED_LOGS)));
     window.dispatchEvent(new CustomEvent('microsoc:logs-updated', { detail: { logs: allLogs } }));
@@ -59,6 +224,10 @@ function saveStoredLogs() {
 
 function getLogId(log) {
     return String(log?._id || log?.id || `${log?.timestamp || ''}-${log?.sourceIP || ''}-${log?.attackType || ''}`);
+}
+
+function isBackendLogId(id) {
+    return /^[a-f0-9]{24}$/i.test(String(id || ''));
 }
 
 function normalizeLog(log) {
@@ -96,9 +265,31 @@ function syncFilteredLogs() {
     filterLogs({ skipApi: true });
 }
 
+function selectEveryFilterOption(selector) {
+    document.querySelectorAll(selector).forEach(option => {
+        option.selected = true;
+    });
+}
+
+function getSelectedFilterValues(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return [];
+
+    const options = Array.from(select.options || []);
+    const selected = Array.from(select.selectedOptions || []).map(option => option.value);
+
+    // If every known option is selected, treat it as "All" so new/unknown values are not hidden.
+    if (options.length > 0 && selected.length >= options.length) {
+        return [];
+    }
+
+    return selected;
+}
+
 // Initialize Logs
 function initLogs() {
-    isLiveStreaming = false;
+    const state = getLiveStreamState();
+    isLiveStreaming = Boolean(state.active && state.owner === getLiveStreamTabId());
     stopLiveStreamTimers();
     pendingLiveLogs = [];
 
@@ -107,14 +298,18 @@ function initLogs() {
     
     // Setup multi-select styling
     setupMultiSelect();
-    document.querySelectorAll('#filter-severity option, #filter-type option').forEach(option => {
-        option.selected = true;
-    });
+    selectEveryFilterOption('#filter-severity option, #filter-type option');
+    const timeFilter = document.getElementById('filter-time');
+    if (timeFilter) {
+        timeFilter.value = 'all';
+    }
 
     updateLiveStreamControls();
+    syncLiveStreamFromState();
     
     // Update stats
     updateLogStats();
+    syncLogRoleUi();
     
     // Load logs for first page
     loadLogsForPage();
@@ -205,11 +400,13 @@ function loadLogsForPage() {
 function renderLogs() {
     const container = document.getElementById('logs-container');
     if (!container) return;
+    const canSelectLogs = canManageLogs();
+    syncSelectionColumnVisibility();
     
     if (!currentLogs.length) {
         container.innerHTML = `
             <tr>
-                <td colspan="9" style="text-align: center; padding: 24px;">
+                <td colspan="${canSelectLogs ? 9 : 8}" style="text-align: center; padding: 24px;">
                     No logs match the current filters. Start live stream to detect new attacks.
                 </td>
             </tr>
@@ -220,11 +417,11 @@ function renderLogs() {
         const jsLogId = escapeJsString(logId);
         return `
         <tr class="log-row" data-id="${escapeHtml(logId)}">
-            <td>
+            ${canSelectLogs ? `<td class="log-select-cell">
                 <input type="checkbox" class="log-checkbox" 
                        onchange="toggleLogSelection('${jsLogId}')" 
                        ${selectedLogs.has(logId) ? 'checked' : ''}>
-            </td>
+            </td>` : ''}
             <td class="timestamp-cell">
                 <div class="log-time">${formatDate(log.timestamp)}</div>
                 <div class="log-date">${new Date(log.timestamp).toLocaleDateString()}</div>
@@ -272,9 +469,7 @@ function renderLogs() {
                     <button class="btn-icon ai-action-btn" onclick="explainLogWithAI('${jsLogId}')" title="AI Explain">
                         <i class="fas fa-brain"></i>
                     </button>
-                    <button class="btn-icon" onclick="createIncidentFromLog('${jsLogId}')" title="Create Incident">
-                        <i class="fas fa-exclamation-triangle"></i>
-                    </button>
+                    ${canManageLogs() ? `<button class="btn-icon" onclick="createIncidentFromLog('${jsLogId}')" title="Create Incident"><i class="fas fa-exclamation-triangle"></i></button>` : ''}
                 </div>
             </td>
         </tr>
@@ -320,15 +515,11 @@ function buildLogApiQuery() {
     const params = new URLSearchParams();
     params.set('page', '1');
     params.set('limit', '5000');
-    params.set('timeRange', document.getElementById('filter-time')?.value || '24h');
+    params.set('timeRange', document.getElementById('filter-time')?.value || 'all');
 
-    Array.from(document.getElementById('filter-severity')?.selectedOptions || [])
-        .map(option => option.value)
-        .forEach(value => params.append('severity', value));
+    getSelectedFilterValues('filter-severity').forEach(value => params.append('severity', value));
 
-    Array.from(document.getElementById('filter-type')?.selectedOptions || [])
-        .map(option => option.value)
-        .forEach(value => params.append('attackType', value));
+    getSelectedFilterValues('filter-type').forEach(value => params.append('attackType', value));
 
     const sourceIP = document.getElementById('filter-ip')?.value?.trim();
     if (sourceIP) params.set('sourceIP', sourceIP);
@@ -355,7 +546,7 @@ async function refreshLogsFromApi() {
             throw new Error(payload.message || 'Log history sync failed');
         }
 
-        allLogs = mergeLogs(payload.logs || [], loadStoredLogs());
+        allLogs = filterDeletedLogs(mergeLogs(payload.logs || [], loadStoredLogs()));
         saveStoredLogs();
         filterLogs({ skipApi: true });
     } catch (error) {
@@ -368,16 +559,75 @@ function queueLogsApiRefresh() {
     logsApiRefreshTimer = setTimeout(refreshLogsFromApi, 350);
 }
 
+async function persistLiveLogsToBackend(logs) {
+    const token = localStorage.getItem('token') || '';
+    if (!token || !Array.isArray(logs) || logs.length === 0) return [];
+
+    const response = await fetch(`${getApiBaseUrl()}/logs/bulk`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(logs.map(log => ({
+            attackType: log.attackType,
+            sourceIP: log.sourceIP,
+            targetSystem: log.targetSystem,
+            severity: log.severity,
+            country: log.country,
+            description: log.description,
+            isBlocked: log.isBlocked,
+            userAgent: log.userAgent,
+            port: log.port,
+            protocol: log.protocol,
+            metadata: log.metadata || {}
+        })))
+    });
+
+    const payload = await response.json();
+    if (!response.ok || !payload.success) {
+        throw new Error(payload.message || 'Failed to sync live logs');
+    }
+
+    return Array.isArray(payload.logs) ? payload.logs : [];
+}
+
+async function deleteLogsFromBackend(ids) {
+    const backendIds = ids.filter(isBackendLogId);
+    if (!backendIds.length) {
+        return { deletedCount: 0 };
+    }
+
+    const token = localStorage.getItem('token') || '';
+    if (!token) {
+        throw new Error('Login token missing. Please login again before deleting synced logs.');
+    }
+
+    const response = await fetch(`${getApiBaseUrl()}/logs`, {
+        method: 'DELETE',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ ids: backendIds })
+    });
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok || !payload.success) {
+        throw new Error(payload.message || 'Failed to delete logs from server');
+    }
+
+    return {
+        deletedCount: Number(payload.deletedCount) || backendIds.length
+    };
+}
+
 // Filter Logs
 function filterLogs(options = {}) {
-    const severityFilter = Array.from(document.getElementById('filter-severity').selectedOptions)
-        .map(option => option.value);
-    
-    const typeFilter = Array.from(document.getElementById('filter-type').selectedOptions)
-        .map(option => option.value);
-    
-    const ipFilter = document.getElementById('filter-ip').value.toLowerCase();
-    const timeFilter = document.getElementById('filter-time').value;
+    const severityFilter = getSelectedFilterValues('filter-severity');
+    const typeFilter = getSelectedFilterValues('filter-type');
+    const ipFilter = document.getElementById('filter-ip')?.value.toLowerCase() || '';
+    const timeFilter = document.getElementById('filter-time')?.value || 'all';
     
     const now = Date.now();
     let timeLimit = now;
@@ -448,16 +698,13 @@ function resetFilters() {
     document.getElementById('filter-severity').selectedIndex = -1;
     document.getElementById('filter-type').selectedIndex = -1;
     document.getElementById('filter-ip').value = '';
-    document.getElementById('filter-time').value = '24h';
+    document.getElementById('filter-time').value = 'all';
     document.getElementById('search-logs').value = '';
     
-    document.querySelectorAll('#filter-severity option, #filter-type option').forEach(option => {
-        option.selected = true;
-    });
+    selectEveryFilterOption('#filter-severity option, #filter-type option');
     
-    filteredLogs = [...allLogs];
     currentPage = 1;
-    loadLogsForPage();
+    filterLogs();
 }
 
 // Pagination Functions
@@ -492,11 +739,25 @@ function changeItemsPerPage() {
 }
 
 // Live Stream Functions
-function startLiveStream() {
+function startLiveStream(options = {}) {
     if (isLiveStreaming) return;
+
+    const claimed = claimLiveStreamOwnership();
+    if (!claimed && !options.fromSync) {
+        showNotification('Live stream is already running in another tab.', 'warning', {
+            title: 'Live Stream'
+        });
+        return;
+    }
     
     isLiveStreaming = true;
     updateLiveStreamControls();
+    setLiveStreamState({
+        active: true,
+        owner: getLiveStreamTabId(),
+        startedAt: getLiveStreamState().startedAt || new Date().toISOString(),
+        lastSeenAt: new Date().toISOString()
+    });
     
     liveStreamFirstTimer = setTimeout(() => {
         addNewLiveLog();
@@ -506,22 +767,27 @@ function startLiveStream() {
         addNewLiveLog();
     }, LIVE_STREAM_INTERVAL_MS);
 
-    showNotification('Live stream started. First event will appear in a moment.', 'info', {
-        title: 'Live Stream'
-    });
+    if (!options.fromSync) {
+        showNotification('Live stream started. First event will appear in a moment.', 'info', {
+            title: 'Live Stream'
+        });
+    }
 }
 
-function pauseLiveStream() {
+function pauseLiveStream(options = {}) {
     if (!isLiveStreaming) return;
     
     isLiveStreaming = false;
     stopLiveStreamTimers();
     pendingLiveLogs = [];
     updateLiveStreamControls();
+    releaseLiveStreamOwnership();
 
-    showNotification('Live stream paused.', 'info', {
-        title: 'Live Stream'
-    });
+    if (!options.fromSync) {
+        showNotification('Live stream paused.', 'info', {
+            title: 'Live Stream'
+        });
+    }
 }
 
 function updateLiveStreamControls() {
@@ -548,6 +814,26 @@ function stopLiveStreamTimers() {
     liveStreamFirstTimer = null;
     liveRenderTimer = null;
 }
+
+window.addEventListener('storage', (event) => {
+    if (event.key === LIVE_STREAM_STATE_KEY) {
+        syncLiveStreamFromState();
+    }
+});
+
+window.addEventListener('beforeunload', () => {
+    if (isLiveStreaming) {
+        const state = getLiveStreamState();
+        if (state.owner === getLiveStreamTabId()) {
+            setLiveStreamState({
+                active: true,
+                owner: state.owner,
+                startedAt: state.startedAt,
+                lastSeenAt: new Date().toISOString()
+            });
+        }
+    }
+});
 
 function addNewLiveLog() {
     if (!isLiveStreaming) return;
@@ -585,22 +871,46 @@ function flushLiveLogs() {
     if (!isLiveStreaming || pendingLiveLogs.length === 0) return;
 
     const newLogs = pendingLiveLogs.splice(0);
-    allLogs = mergeLogs(newLogs, allLogs);
-    saveStoredLogs();
-    syncFilteredLogs();
-    
-    updateLogStats();
+    persistLiveLogsToBackend(newLogs)
+        .then((savedLogs) => {
+            const logsToMerge = savedLogs.length ? savedLogs : newLogs;
+            allLogs = mergeLogs(logsToMerge, allLogs);
+            saveStoredLogs();
+            syncFilteredLogs();
+            updateLogStats();
 
-    const notableLog = newLogs.find(log => ['critical', 'high'].includes(log.severity)) || newLogs[0];
-    const now = Date.now();
-    if (notableLog && now - lastLiveNotificationAt > LIVE_NOTIFICATION_MIN_GAP_MS) {
-        lastLiveNotificationAt = now;
-        const notificationType = ['critical', 'high'].includes(notableLog.severity) ? 'error' : 'warning';
-        showNotification(`${notableLog.severity.toUpperCase()} ${notableLog.attackType} from ${notableLog.sourceIP}`, notificationType, {
-            title: notableLog.isBlocked ? 'Attack Detected and Blocked' : 'Active Attack Detected',
-            meta: `${notableLog.targetSystem} | ${notableLog.protocol}/${notableLog.port} | ${notableLog.country}`
+            const notableLog = logsToMerge.find(log => ['critical', 'high'].includes(log.severity)) || logsToMerge[0];
+            const now = Date.now();
+            if (notableLog && now - lastLiveNotificationAt > LIVE_NOTIFICATION_MIN_GAP_MS) {
+                lastLiveNotificationAt = now;
+                const notificationType = ['critical', 'high'].includes(notableLog.severity) ? 'error' : 'warning';
+                showNotification(`${notableLog.severity.toUpperCase()} ${notableLog.attackType} from ${notableLog.sourceIP}`, notificationType, {
+                    title: notableLog.isBlocked ? 'Attack Detected and Blocked' : 'Active Attack Detected',
+                    meta: `${notableLog.targetSystem} | ${notableLog.protocol}/${notableLog.port} | ${notableLog.country}`
+                });
+            }
+
+            const convertibleLog = logsToMerge.find(log =>
+                ['critical', 'high'].includes(log.severity) &&
+                !log.isBlocked &&
+                !autoConvertedLiveLogIds.has(getLogId(log))
+            );
+
+            if (convertibleLog) {
+                autoConvertedLiveLogIds.add(getLogId(convertibleLog));
+                createIncidentFromLog(getLogId(convertibleLog)).catch(error => {
+                    console.warn('Auto incident creation failed:', error);
+                    autoConvertedLiveLogIds.delete(getLogId(convertibleLog));
+                });
+            }
+        })
+        .catch((error) => {
+            console.warn('Live log sync failed, keeping local copy only:', error);
+            allLogs = mergeLogs(newLogs, allLogs);
+            saveStoredLogs();
+            syncFilteredLogs();
+            updateLogStats();
         });
-    }
 }
 
 function buildLiveDescription(attackType, targetSystem) {
@@ -617,6 +927,8 @@ function buildLiveDescription(attackType, targetSystem) {
 
 // Log Selection Functions
 function toggleLogSelection(logId) {
+    if (!canManageLogs()) return;
+
     const id = String(logId);
     if (selectedLogs.has(id)) {
         selectedLogs.delete(id);
@@ -628,7 +940,10 @@ function toggleLogSelection(logId) {
 }
 
 function selectAllLogs() {
-    const selectAll = document.getElementById('select-all').checked;
+    if (!canManageLogs()) return;
+
+    const selectAllElement = document.getElementById('select-all');
+    const selectAll = Boolean(selectAllElement?.checked);
     const checkboxes = document.querySelectorAll('.log-checkbox');
     
     if (selectAll) {
@@ -643,13 +958,36 @@ function selectAllLogs() {
 }
 
 function updateSelectedCount() {
+    if (!canManageLogs()) {
+        selectedLogs.clear();
+    }
+
+    ensureSelectedDeleteButton();
+
     const count = selectedLogs.size;
     const bulkActions = document.getElementById('bulk-actions');
     const selectedCount = document.getElementById('selected-count');
+    const selectedDeleteButton = document.getElementById('selected-delete-btn');
+    const selectedDeleteCount = selectedDeleteButton?.querySelector('.selected-delete-count');
     
-    selectedCount.textContent = count;
+    if (selectedCount) {
+        selectedCount.textContent = count;
+    }
+
+    if (selectedDeleteButton) {
+        const shouldShow = canManageLogs() && count > 0;
+        selectedDeleteButton.style.display = shouldShow ? 'inline-flex' : 'none';
+        selectedDeleteButton.title = count > 0
+            ? `Delete ${count} selected log${count === 1 ? '' : 's'}`
+            : 'Delete selected logs';
+        if (selectedDeleteCount) {
+            selectedDeleteCount.textContent = count;
+        }
+    }
     
-    if (count > 0) {
+    if (!bulkActions) return;
+
+    if (canManageLogs() && count > 0) {
         bulkActions.style.display = 'block';
     } else {
         bulkActions.style.display = 'none';
@@ -658,7 +996,10 @@ function updateSelectedCount() {
 
 function clearSelection() {
     selectedLogs.clear();
-    document.getElementById('select-all').checked = false;
+    const selectAll = document.getElementById('select-all');
+    if (selectAll) {
+        selectAll.checked = false;
+    }
     document.querySelectorAll('.log-checkbox').forEach(cb => cb.checked = false);
     updateSelectedCount();
 }
@@ -742,15 +1083,13 @@ function viewLogDetail(logId) {
             <div class="log-detail-section">
                 <h4>Actions</h4>
                 <div style="display: flex; flex-direction: column; gap: 10px;">
-                    <button class="btn btn-primary" onclick="createIncidentFromLog('${jsLogId}'); closeLogModal()">
-                        <i class="fas fa-exclamation-triangle"></i> Create Incident
-                    </button>
+                    ${canManageLogs() ? `<button class="btn btn-primary" onclick="createIncidentFromLog('${jsLogId}'); closeLogModal()"><i class="fas fa-exclamation-triangle"></i> Create Incident</button>` : ''}
                     <button class="btn btn-outline" onclick="showRemediation('${jsLogId}')">
                         <i class="fas fa-lightbulb"></i> AI Prevention
                     </button>
-                    <button class="btn btn-outline" onclick="exportSingleLog('${jsLogId}')">
+                    ${canManageLogs() ? `<button class="btn btn-outline" onclick="exportSingleLog('${jsLogId}')">
                         <i class="fas fa-download"></i> Export Log
-                    </button>
+                    </button>` : ''}
                 </div>
             </div>
         </div>
@@ -904,6 +1243,37 @@ function showAIResult(title, result, mode = 'fallback') {
     modal.classList.remove('hidden');
 }
 
+function showAIResultLoading(title, message = 'AI is thinking through the evidence...') {
+    const modal = ensureAIResultModal();
+    const content = document.getElementById('ai-result-content');
+    content.innerHTML = `
+        <div class="ai-loading-state">
+            <div class="ai-loading-orb"><i class="fas fa-brain"></i></div>
+            <h4>${escapeHtml(title || 'AI Analysis')}</h4>
+            <p>${escapeHtml(message)}</p>
+            <div class="ai-loading-steps">
+                <span>Reading log evidence</span>
+                <span>Mapping threat behavior</span>
+                <span>Drafting response plan</span>
+            </div>
+        </div>
+    `;
+    modal.classList.remove('hidden');
+}
+
+function showAIResultError(title, message) {
+    const modal = ensureAIResultModal();
+    const content = document.getElementById('ai-result-content');
+    content.innerHTML = `
+        <div class="ai-loading-state ai-error-state">
+            <div class="ai-loading-orb"><i class="fas fa-triangle-exclamation"></i></div>
+            <h4>${escapeHtml(title || 'AI Analysis Failed')}</h4>
+            <p>${escapeHtml(message || 'AI provider could not complete this explanation right now.')}</p>
+        </div>
+    `;
+    modal.classList.remove('hidden');
+}
+
 function closeAIResultModal() {
     document.getElementById('ai-result-modal')?.classList.add('hidden');
 }
@@ -912,6 +1282,7 @@ async function explainLogWithAI(logId) {
     const log = allLogs.find(l => getLogId(l) === String(logId));
     if (!log) return;
 
+    showAIResultLoading(`Log #${getLogId(log)} AI Explanation`, 'AI is explaining this log...');
     showNotification('AI is explaining this log...', 'info');
 
     try {
@@ -930,6 +1301,7 @@ async function explainLogWithAI(logId) {
         showAIResult(`Log #${getLogId(log)} AI Explanation`, payload.data, payload.mode);
     } catch (error) {
         console.error('AI log explanation failed:', error);
+        showAIResultError(`Log #${getLogId(log)} AI Explanation`, error.message || 'AI provider could not explain this log right now.');
         showNotification(error.message || 'AI provider could not explain this log right now.', 'error');
     }
 }
@@ -1007,6 +1379,10 @@ function updateIncidentCount(delta = 1) {
 
 // Create Incident from Log
 async function createIncidentFromLog(logId) {
+    if (!canManageLogs()) {
+        showNotification('Only admins can create incidents from logs.', 'warning');
+        return;
+    }
     const log = allLogs.find(l => getLogId(l) === String(logId));
     if (!log) return;
 
@@ -1032,6 +1408,10 @@ async function createIncidentFromLog(logId) {
 
 // Create Incident from Selected Logs
 async function createIncidentFromSelected() {
+    if (!canManageLogs()) {
+        showNotification('Only admins can create incidents from selected logs.', 'warning');
+        return;
+    }
     if (selectedLogs.size === 0) return;
     
     const selectedLogIds = Array.from(selectedLogs);
@@ -1085,6 +1465,10 @@ function createIncidentFromCurrentLog() {
 
 // Export Functions
 function exportLogs() {
+    if (!canManageLogs()) {
+        showNotification('Only admins can export logs from this screen.', 'warning');
+        return;
+    }
     const dataStr = JSON.stringify(filteredLogs, null, 2);
     const dataBlob = new Blob([dataStr], {type: 'application/json'});
     
@@ -1101,6 +1485,10 @@ function exportLogs() {
 }
 
 function exportSelectedLogs() {
+    if (!canManageLogs()) {
+        showNotification('Only admins can export selected logs.', 'warning');
+        return;
+    }
     if (selectedLogs.size === 0) {
         alert('No logs selected for export');
         return;
@@ -1124,6 +1512,10 @@ function exportSelectedLogs() {
 }
 
 function exportSingleLog(logId) {
+    if (!canManageLogs()) {
+        showNotification('Only admins can export logs.', 'warning');
+        return;
+    }
     const log = allLogs.find(l => getLogId(l) === String(logId));
     if (!log) return;
     
@@ -1163,7 +1555,7 @@ function clearLogs() {
 }
 
 // Delete Selected Logs
-function deleteSelectedLogs() {
+async function deleteSelectedLogs() {
     if (!canManageLogs()) {
         showNotification('Only admins can delete logs.', 'error');
         return;
@@ -1175,20 +1567,32 @@ function deleteSelectedLogs() {
     }
     
     if (confirm(`Are you sure you want to delete ${selectedLogs.size} selected logs?`)) {
-        // Remove selected logs
-        allLogs = allLogs.filter(log => !selectedLogs.has(getLogId(log)));
-        filteredLogs = filteredLogs.filter(log => !selectedLogs.has(getLogId(log)));
-        const deletedCount = selectedLogs.size;
-        saveStoredLogs();
-        
-        // Clear selection
-        clearSelection();
-        
-        // Reload
-        loadLogsForPage();
-        updateLogStats();
-        
-        showNotification(`${deletedCount} logs deleted`, 'success');
+        const idsToDelete = Array.from(selectedLogs).map(String);
+        const backendIds = idsToDelete.filter(isBackendLogId);
+
+        try {
+            if (backendIds.length) {
+                await deleteLogsFromBackend(backendIds);
+            }
+
+            rememberDeletedLogIds(idsToDelete);
+            allLogs = allLogs.filter(log => !idsToDelete.includes(getLogId(log)));
+            filteredLogs = filteredLogs.filter(log => !idsToDelete.includes(getLogId(log)));
+            const deletedCount = idsToDelete.length;
+            saveStoredLogs();
+
+            clearSelection();
+            loadLogsForPage();
+            updateLogStats();
+            refreshLogsFromApi();
+
+            showNotification(`${deletedCount} logs deleted`, 'success');
+        } catch (error) {
+            console.error('Delete selected logs failed:', error);
+            showNotification(error.message || 'Could not delete selected logs from server.', 'error', {
+                title: 'Delete Failed'
+            });
+        }
     }
 }
 

@@ -39,16 +39,14 @@ async function createDemoLog(userId) {
   mockLog.processedAt = new Date();
   const log = await Log.create(mockLog);
   broadcast({ type: 'new-log', log });
-  if (['critical', 'high'].includes(log.severity)) {
-    broadcast({
-      type: 'alert',
-      alert: {
-        title: `${log.severity.toUpperCase()} ${log.attackType}`,
-        message: `${log.sourceIP} targeting ${log.targetSystem}`,
-        severity: log.severity,
-        timestamp: log.timestamp
-      }
+  try {
+    const threatPipeline = require('./threatPipeline');
+    threatPipeline.queueLogAnalysis(log, {
+      userId,
+      source: 'demo'
     });
+  } catch (error) {
+    // The demo feed should still work even if threat analysis is unavailable.
   }
   return log;
 }

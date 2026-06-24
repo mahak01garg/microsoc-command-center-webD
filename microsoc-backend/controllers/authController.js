@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const crypto = require('crypto');
+const { recordAuditEvent } = require('../utils/auditLogger');
 const {
   sendApprovalRequestEmail,
   sendPasswordResetOtpEmail
@@ -50,6 +51,20 @@ exports.register = async (req, res) => {
         role: user.role,
         approvalStatus: user.approvalStatus
       }
+    });
+
+    await recordAuditEvent(req, {
+      actor: null,
+      actorName: user.name,
+      actorEmail: user.email,
+      actorRole: user.role,
+      action: 'User Added',
+      module: 'users',
+      targetType: 'User',
+      targetId: String(user._id),
+      targetLabel: user.email,
+      details: `New user registration requested for ${user.email}`,
+      metadata: { approvalStatus: user.approvalStatus }
     });
   } catch (error) {
     console.error('❌ Registration error:', error);
@@ -133,6 +148,20 @@ exports.login = async (req, res) => {
         lastLogin: user.lastLogin
       }
     });
+
+    await recordAuditEvent(req, {
+      actor: user._id,
+      actorName: user.name,
+      actorEmail: user.email,
+      actorRole: user.role,
+      action: 'User Logged In',
+      module: 'auth',
+      targetType: 'Session',
+      targetId: String(user._id),
+      targetLabel: user.email,
+      details: `User logged in successfully`,
+      metadata: { loginCount: user.loginCount }
+    });
   } catch (error) {
     console.error('❌ Login error:', error);
     res.status(500).json({
@@ -198,7 +227,14 @@ exports.requestPasswordReset = async (req, res) => {
     if (user) {
       const otp = user.createPasswordResetOtp();
       await user.save();
-      await sendPasswordResetOtpEmail({ user, otp });
+      const emailResult = await sendPasswordResetOtpEmail({ user, otp });
+
+      if (!emailResult.sent) {
+        return res.status(500).json({
+          success: false,
+          message: emailResult.error || 'OTP email delivery failed. Please try again later.'
+        });
+      }
     }
 
     res.status(200).json({
@@ -259,6 +295,20 @@ exports.resetPassword = async (req, res) => {
     user.passwordResetOtpExpires = undefined;
     await user.save();
 
+    await recordAuditEvent(req, {
+      actor: user._id,
+      actorName: user.name,
+      actorEmail: user.email,
+      actorRole: user.role,
+      action: 'Password Reset',
+      module: 'auth',
+      targetType: 'User',
+      targetId: String(user._id),
+      targetLabel: user.email,
+      details: 'Password changed using OTP',
+      metadata: { via: 'otp' }
+    });
+
     res.status(200).json({
       success: true,
       message: 'Password changed successfully. You can login with your new password.'
@@ -297,6 +347,20 @@ exports.approveUser = async (req, res) => {
     user.isActive = true;
     await user.save();
 
+    await recordAuditEvent(req, {
+      actor: null,
+      actorName: User.getPrimaryAdminEmail(),
+      actorEmail: User.getPrimaryAdminEmail(),
+      actorRole: 'system',
+      action: 'User Approved',
+      module: 'users',
+      targetType: 'User',
+      targetId: String(user._id),
+      targetLabel: user.email,
+      details: `Access approved for ${user.email}`,
+      metadata: { source: 'email-link' }
+    });
+
     res.status(200).send(`<h2>Access approved</h2><p>${user.email} can now login to MicroSOC.</p>`);
   } catch (error) {
     console.error('❌ Approval error:', error);
@@ -328,6 +392,20 @@ exports.rejectUser = async (req, res) => {
     user.approvalToken = undefined;
     user.isActive = false;
     await user.save();
+
+    await recordAuditEvent(req, {
+      actor: null,
+      actorName: User.getPrimaryAdminEmail(),
+      actorEmail: User.getPrimaryAdminEmail(),
+      actorRole: 'system',
+      action: 'User Rejected',
+      module: 'users',
+      targetType: 'User',
+      targetId: String(user._id),
+      targetLabel: user.email,
+      details: `Access rejected for ${user.email}`,
+      metadata: { source: 'email-link' }
+    });
 
     res.status(200).send(`<h2>Access rejected</h2><p>${user.email} cannot login to MicroSOC.</p>`);
   } catch (error) {

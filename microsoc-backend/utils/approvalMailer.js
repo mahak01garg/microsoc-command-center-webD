@@ -1,6 +1,21 @@
 const User = require('../models/User');
+const sgMail = require('@sendgrid/mail');
 
 const ADMIN_EMAIL = User.getPrimaryAdminEmail();
+const DEFAULT_SENDGRID_FROM = `MicroSOC <${ADMIN_EMAIL}>`;
+
+function getEmailFrom() {
+  return (
+    process.env.SENDGRID_FROM_EMAIL ||
+    process.env.APPROVAL_EMAIL_FROM ||
+    process.env.EMAIL_FROM ||
+    DEFAULT_SENDGRID_FROM
+  );
+}
+
+function getReplyTo() {
+  return process.env.APPROVAL_REPLY_TO || process.env.EMAIL_REPLY_TO || '';
+}
 
 function getBaseUrl(req) {
   if (process.env.BACKEND_PUBLIC_URL) {
@@ -20,45 +35,58 @@ function buildApprovalLinks(req, token) {
   };
 }
 
-async function sendWithResend({ to, subject, html, text }) {
-  if (!process.env.RESEND_API_KEY) {
-    return { skipped: true, reason: 'RESEND_API_KEY is not configured' };
+async function sendWithSendGrid({ to, subject, html, text }) {
+  if (!process.env.SENDGRID_API_KEY) {
+    return { skipped: true, reason: 'SENDGRID_API_KEY is not configured' };
   }
 
-  const from = process.env.APPROVAL_EMAIL_FROM || 'MicroSOC <onboarding@resend.dev>';
-  const replyTo = process.env.APPROVAL_REPLY_TO;
-  const payload = { from, to, subject, html, text };
+  const from = getEmailFrom();
+  const replyTo = getReplyTo();
+  const recipients = Array.isArray(to) ? to : [to].filter(Boolean);
+  const payload = { from, to: recipients, subject, html, text };
+
   if (replyTo) {
-    payload.reply_to = replyTo;
+    payload.replyTo = replyTo;
   }
 
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
+  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`Resend email failed: ${response.status} ${errorBody}`);
+  try {
+    const [response] = await sgMail.send(payload);
+    return {
+      sent: true,
+      provider: 'sendgrid',
+      from,
+      to: recipients,
+      response: JSON.stringify({
+        statusCode: response.statusCode,
+        headers: response.headers
+      })
+    };
+  } catch (error) {
+    const responseBody = error?.response?.body
+      ? JSON.stringify(error.response.body)
+      : error.message;
+    const sendgridVerificationHint = /validation_error|verified sender|authenticate a domain|from address/i.test(responseBody)
+      ? ' Make sure SENDGRID_FROM_EMAIL / APPROVAL_EMAIL_FROM is a SendGrid-verified sender email or authenticated domain, then restart the backend.'
+      : '';
+    const providerHint = from === DEFAULT_SENDGRID_FROM
+      ? ' Set APPROVAL_EMAIL_FROM or SENDGRID_FROM_EMAIL to a verified sender email.'
+      : sendgridVerificationHint;
+    throw new Error(`SendGrid email failed: ${responseBody}.${providerHint}`);
   }
-
-  return response.json();
 }
 
 async function sendEmailOrLog({ to, subject, html, text, fallbackLog }) {
   try {
-    const result = await sendWithResend({ to, subject, html, text });
+    const result = await sendWithSendGrid({ to, subject, html, text });
 
     if (result.skipped) {
       console.warn(`⚠️ Email skipped: ${result.reason}`);
       if (fallbackLog) fallbackLog();
     }
 
-    return { sent: !result.skipped };
+    return { sent: !result.skipped, ...result };
   } catch (error) {
     console.error('❌ Email error:', error.message);
     if (fallbackLog) fallbackLog();

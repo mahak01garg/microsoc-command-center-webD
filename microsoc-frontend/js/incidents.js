@@ -1,6 +1,7 @@
 // Incidents Page JavaScript
 
 let incidents = [];
+let assignableUsersCache = [];
 
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'http://localhost:5001/api';
@@ -25,10 +26,228 @@ function isAdminUser() {
     return getCurrentUserRole() === 'admin';
 }
 
+function getStoredLocalIncidents() {
+    try {
+        const saved = JSON.parse(localStorage.getItem('microsocLocalIncidents') || '[]');
+        return Array.isArray(saved) ? saved : [];
+    } catch (error) {
+        return [];
+    }
+}
+
+function syncIncidentRoleUi() {
+    const createButton = document.querySelector('.main-header .btn.btn-primary[onclick*="openNewIncidentModal"]');
+    if (createButton) {
+        createButton.style.display = isAdminUser() ? '' : 'none';
+    }
+
+    const headerTitle = document.querySelector('.main-header .header-left h1');
+    const headerSubtitle = document.querySelector('.main-header .header-left .subtitle');
+    if (headerTitle) {
+        headerTitle.innerHTML = isAdminUser()
+            ? '<i class="fas fa-exclamation-triangle"></i> Incident Management'
+            : '<i class="fas fa-user-shield"></i> My Incidents';
+    }
+    if (headerSubtitle) {
+        headerSubtitle.textContent = isAdminUser()
+            ? 'Monitor and manage security incidents'
+            : 'Only assigned incidents can be updated from this view';
+    }
+}
+
+async function loadAssignableUsers() {
+    if (assignableUsersCache.length) {
+        return assignableUsersCache;
+    }
+
+    const res = await fetch(`${getApiBaseUrl()}/users`, {
+        headers: getAuthHeaders()
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+        throw new Error(data.message || 'Failed to load users');
+    }
+
+    assignableUsersCache = (data.users || [])
+        .filter(user => user && user.role !== 'viewer' && user.isActive !== false && user.approvalStatus === 'approved')
+        .sort((a, b) => {
+            if (a.role !== b.role) {
+                return a.role === 'admin' ? -1 : 1;
+            }
+            return String(a.name || a.email || '').localeCompare(String(b.name || b.email || ''));
+        });
+
+    return assignableUsersCache;
+}
+
+function ensureAssignIncidentModal() {
+    let modal = document.getElementById('assign-incident-modal');
+    if (modal) return modal;
+
+    modal = document.createElement('div');
+    modal.id = 'assign-incident-modal';
+    modal.className = 'modal hidden';
+    modal.innerHTML = `
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-user-plus"></i> Assign Incident</h3>
+                <button class="close-modal" onclick="closeAssignIncidentModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="assign-incident-summary" class="timeline-incident-summary" style="margin-bottom:16px;"></div>
+                <div class="form-group">
+                    <label for="assign-incident-user">Assign to</label>
+                    <select id="assign-incident-user">
+                        <option value="">Loading users...</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="assign-incident-note">Note</label>
+                    <textarea id="assign-incident-note" rows="4" placeholder="Optional note for assignment timeline"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeAssignIncidentModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="submitIncidentAssignment()">
+                    <i class="fas fa-user-check"></i> Save Assignment
+                </button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    return modal;
+}
+
+function renderAssignIncidentSummary(incident) {
+    const summary = document.getElementById('assign-incident-summary');
+    if (!summary) return;
+
+    summary.innerHTML = `
+        <h4>${escapeHtml(incident.title || 'Incident')}</h4>
+        <p>${escapeHtml(incident.description || 'No description')}</p>
+        <div class="timeline-incident-meta">
+            <span class="badge badge-danger">${escapeHtml((incident.severity || 'medium').toUpperCase())}</span>
+            <span class="status-badge status-${escapeHtml(incident.status || 'open')}">${escapeHtml((incident.status || 'open').replace('_', ' ').toUpperCase())}</span>
+            <span>Current assignee: ${escapeHtml(incident.assignedToLabel || incident.assignedTo || 'Unassigned')}</span>
+        </div>
+    `;
+}
+
+async function openAssignIncidentModal(id) {
+    if (!isAdminUser()) {
+        showNotification('Only admins can assign incidents.', 'warning');
+        return;
+    }
+
+    const incident = incidents.find(i => String(i.id) === String(id));
+    if (!incident) {
+        showNotification('Incident not found.', 'error');
+        return;
+    }
+
+    if (String(incident.id).startsWith('local-')) {
+        showNotification('Local incidents can only be viewed until they are synced with the backend.', 'warning');
+        return;
+    }
+
+    const modal = ensureAssignIncidentModal();
+    modal.dataset.incidentId = String(incident.id);
+    renderAssignIncidentSummary(incident);
+
+    const userSelect = document.getElementById('assign-incident-user');
+    const noteField = document.getElementById('assign-incident-note');
+    if (userSelect) {
+        userSelect.innerHTML = '<option value="">Unassigned</option>';
+        userSelect.disabled = true;
+        userSelect.insertAdjacentHTML('beforeend', '<option value="">Loading users...</option>');
+    }
+    if (noteField) {
+        noteField.value = '';
+    }
+
+    try {
+        const users = await loadAssignableUsers();
+        if (userSelect) {
+            userSelect.innerHTML = '<option value="">Unassigned</option>';
+            if (users.length) {
+                    users.forEach((user) => {
+                        const option = document.createElement('option');
+                        option.value = user.id || user._id;
+                        option.textContent = `${user.name || user.email} (${String(user.role || '').toUpperCase()})`;
+                        if (
+                            String(incident.assignedToId || '') === String(user.id || user._id) ||
+                            String(incident.assignedToLabel || '').toLowerCase().includes(String(user.email || user.name || '').toLowerCase())
+                        ) {
+                            option.selected = true;
+                        }
+                        userSelect.appendChild(option);
+                    });
+            } else {
+                userSelect.insertAdjacentHTML('beforeend', '<option value="" disabled>No active approved users found</option>');
+            }
+            userSelect.disabled = false;
+        }
+    } catch (error) {
+        console.error('Failed to load assignable users:', error);
+        if (userSelect) {
+            userSelect.innerHTML = '<option value="">Unassigned</option><option value="" disabled>Unable to load users</option>';
+            userSelect.disabled = false;
+        }
+        showNotification(error.message || 'Failed to load users', 'error');
+    }
+
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeAssignIncidentModal() {
+    const modal = document.getElementById('assign-incident-modal');
+    if (modal) {
+        delete modal.dataset.incidentId;
+        modal.classList.add('hidden');
+    }
+    document.body.style.overflow = '';
+}
+
+async function submitIncidentAssignment() {
+    const modal = document.getElementById('assign-incident-modal');
+    const incidentId = modal?.dataset?.incidentId;
+    if (!incidentId) return;
+
+    const userSelect = document.getElementById('assign-incident-user');
+    const noteField = document.getElementById('assign-incident-note');
+    const userId = userSelect?.value || '';
+    const note = noteField?.value?.trim() || '';
+
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/incidents/${incidentId}/assign`, {
+            method: 'PUT',
+            headers: getAuthHeaders(),
+            body: JSON.stringify({
+                userId: userId || null,
+                note: note || undefined
+            })
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.message || 'Incident assignment failed');
+        }
+
+        closeAssignIncidentModal();
+        await loadIncidents();
+        showNotification('Incident assignment saved successfully.', 'success');
+    } catch (error) {
+        console.error('Assign incident failed:', error);
+        showNotification(error.message || 'Incident assignment failed', 'error');
+    }
+}
+
 // Load Incidents
 async function loadIncidents() {
     try {
-        const res = await fetch(`${getApiBaseUrl()}/incidents?limit=50`, {
+        const query = '?limit=50';
+        const res = await fetch(`${getApiBaseUrl()}/incidents${query}`, {
             headers: getAuthHeaders()
         });
 
@@ -39,14 +258,33 @@ async function loadIncidents() {
         }
 
         const backendIncidents = Array.isArray(data.incidents) ? data.incidents.map(normalizeIncident) : [];
-        incidents = backendIncidents;
+        const localIncidents = getStoredLocalIncidents().map(normalizeIncident);
+        const mergedIncidents = [...backendIncidents];
+        const seenIds = new Set(backendIncidents.map(incident => String(incident.id)));
+
+        localIncidents.forEach((incident) => {
+            const key = String(incident.id);
+            if (!seenIds.has(key)) {
+                seenIds.add(key);
+                mergedIncidents.push(incident);
+            }
+        });
+
+        incidents = mergedIncidents.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        syncIncidentRoleUi();
         renderInciments(incidents);
-        renderIncidentStats(data.stats);
+        renderIncidentStats(data.stats, incidents);
     } catch (err) {
         console.error("Failed to load incidents", err);
-        incidents = [];
-        renderIncidentError(err.message || 'No live incident data available.');
-        renderIncidentStats();
+        incidents = getStoredLocalIncidents().map(normalizeIncident);
+        syncIncidentRoleUi();
+        if (incidents.length) {
+            renderInciments(incidents);
+            renderIncidentStats(null, incidents);
+        } else {
+            renderIncidentError(err.message || 'No live incident data available.');
+            renderIncidentStats();
+        }
     }
 }
 
@@ -58,6 +296,12 @@ function normalizeIncident(incident) {
     return {
         ...incident,
         id: incident.id || incident._id,
+        assignedToId: incident.assignedTo && typeof incident.assignedTo === 'object'
+            ? (incident.assignedTo.id || incident.assignedTo._id || '')
+            : (incident.assignedToId || ''),
+        assignedToLabel: incident.assignedTo && typeof incident.assignedTo === 'object'
+            ? `${incident.assignedTo.name || ''}${incident.assignedTo.name && incident.assignedTo.email ? ' · ' : ''}${incident.assignedTo.email || ''}`.trim() || incident.assignedTo.name || incident.assignedTo.email
+            : (incident.assignedToLabel || assignedTo),
         assignedTo,
         logs: Array.isArray(incident.logs)
             ? incident.logs.length
@@ -75,16 +319,24 @@ function renderIncidentError(message) {
     tbody.innerHTML = `<tr><td colspan="7">${escapeHtml(message)}</td></tr>`;
 }
 
-function renderIncidentStats(stats) {
+function renderIncidentStats(stats, incidentList = incidents) {
     const grid = document.querySelector('.main-content .stats-grid');
     if (!grid) return;
 
     const statusCounts = Object.fromEntries((stats?.statusCounts || []).map(item => [item._id, item.count]));
     const severityCounts = Object.fromEntries((stats?.severityCounts || []).map(item => [item._id, item.count]));
-    const open = statusCounts.open || 0;
-    const inProgress = statusCounts.in_progress || 0;
-    const resolved = statusCounts.resolved || 0;
-    const critical = severityCounts.critical || 0;
+    const localStatusCounts = incidentList.reduce((acc, incident) => {
+        acc[incident.status] = (acc[incident.status] || 0) + 1;
+        return acc;
+    }, {});
+    const localSeverityCounts = incidentList.reduce((acc, incident) => {
+        acc[incident.severity] = (acc[incident.severity] || 0) + 1;
+        return acc;
+    }, {});
+    const open = statusCounts.open || localStatusCounts.open || 0;
+    const inProgress = statusCounts.in_progress || localStatusCounts.in_progress || 0;
+    const resolved = statusCounts.resolved || localStatusCounts.resolved || 0;
+    const critical = severityCounts.critical || localSeverityCounts.critical || 0;
 
     const cards = [
         { icon: 'fa-exclamation-circle', title: 'Open Incidents', value: open, color: '#dc3545' },
@@ -118,6 +370,7 @@ function renderIncidentStats(stats) {
 function renderInciments(filteredIncidents = incidents) {
     const tbody = document.querySelector('#incidents-table tbody');
     if (!tbody) return;
+    const admin = isAdminUser();
 
     if (!filteredIncidents.length) {
         tbody.innerHTML = '<tr><td colspan="7">No incidents found.</td></tr>';
@@ -125,10 +378,15 @@ function renderInciments(filteredIncidents = incidents) {
     }
     
     tbody.innerHTML = filteredIncidents.map(incident => `
+        ${(() => {
+            const isLocal = String(incident.id).startsWith('local-');
+            const disabledAttr = isLocal ? 'disabled title="Local incident - read only until backend syncs"' : '';
+            const localBadge = isLocal ? '<span class="badge badge-warning" style="margin-left:8px;">LOCAL</span>' : '';
+            return `
         <tr data-id="${incident.id}">
             <td>#${incident.id}</td>
             <td>
-                <strong>${incident.title}</strong>
+                <strong>${incident.title}</strong>${localBadge}
                 <div class="incident-description">${incident.description}</div>
             </td>
             <td>
@@ -144,17 +402,21 @@ function renderInciments(filteredIncidents = incidents) {
             <td>${incident.assignedTo || 'Unassigned'}</td>
             <td>${formatDate(incident.createdAt)}</td>
             <td>
-                <button class="btn btn-sm btn-outline" onclick="viewIncident('${incident.id}')">
+                <button class="btn btn-sm btn-outline" onclick="viewIncident('${incident.id}')" ${disabledAttr}>
                     <i class="fas fa-eye"></i>
                 </button>
-                <button class="btn btn-sm btn-outline ai-action-btn" onclick="triageIncidentWithAI('${incident.id}')" title="AI Triage">
+                <button class="btn btn-sm btn-outline" onclick="viewIncidentTimeline('${incident.id}')" ${disabledAttr} title="View full timeline">
+                    <i class="fas fa-stream"></i>
+                </button>
+                <button class="btn btn-sm btn-outline ai-action-btn" onclick="triageIncidentWithAI('${incident.id}')" ${disabledAttr} title="AI Triage">
                     <i class="fas fa-brain"></i>
                 </button>
-                <button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')">
-                    <i class="fas fa-edit"></i>
-                </button>
+                ${admin ? `<button class="btn btn-sm btn-outline" onclick="openAssignIncidentModal('${incident.id}')" ${disabledAttr} title="Assign incident"><i class="fas fa-user-plus"></i></button>` : ''}
+                ${admin ? `<button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')" ${disabledAttr}><i class="fas fa-edit"></i></button>` : `<button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')" ${disabledAttr} title="Update Status"><i class="fas fa-pen"></i></button>`}
             </td>
         </tr>
+            `;
+        })()}
     `).join('');
 }
 
@@ -196,6 +458,10 @@ function searchIncidents() {
 
 // Open New Incident Modal
 function openNewIncidentModal() {
+    if (!isAdminUser()) {
+        showNotification('Only admins can create incidents from this screen.', 'warning');
+        return;
+    }
     const modal = document.getElementById('new-incident-modal');
     if (!modal) return;
     const assigneeSelect = document.getElementById('incident-assignee');
@@ -233,6 +499,10 @@ function closeModal() {
 
 // Create New Incident
 async function createNewIncident() {
+    if (!isAdminUser()) {
+        alert('Only admins can create incidents.');
+        return;
+    }
     const title = document.getElementById('incident-title').value;
     const description = document.getElementById('incident-description').value;
     const severity = document.getElementById('incident-severity').value;
@@ -287,13 +557,111 @@ function viewIncident(id) {
         
         Severity: ${incident.severity.toUpperCase()}
         Status: ${incident.status.toUpperCase()}
-        Assigned To: ${incident.assignedTo || 'Unassigned'}
+        Assigned To: ${incident.assignedToLabel || incident.assignedTo || 'Unassigned'}
         Created: ${formatDate(incident.createdAt)}
         Source IP: ${incident.sourceIP}
         Related Logs: ${incident.logs}
     `;
     
     alert(details);
+}
+
+function ensureIncidentTimelineModal() {
+    let modal = document.getElementById('incident-timeline-modal');
+    if (modal) return modal;
+
+    modal = document.createElement('div');
+    modal.id = 'incident-timeline-modal';
+    modal.className = 'modal hidden';
+    modal.innerHTML = `
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-stream"></i> Incident Timeline</h3>
+                <button class="close-modal" onclick="closeIncidentTimelineModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="incident-timeline-content" class="incident-timeline-content"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeIncidentTimelineModal()">Close</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    return modal;
+}
+
+function formatTimelineTimestamp(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? 'Unknown time' : date.toLocaleString();
+}
+
+function renderIncidentTimeline(incident) {
+    const content = document.getElementById('incident-timeline-content');
+    if (!content) return;
+
+    const events = Array.isArray(incident.timelineEvents) ? incident.timelineEvents : [];
+    const relatedLogs = Array.isArray(incident.relatedLogs) ? incident.relatedLogs : [];
+
+    const eventList = events.length
+        ? events.map(event => `
+            <article class="timeline-entry ${event.type || 'timeline_event'}">
+                <div class="timeline-entry-head">
+                    <strong>${escapeHtml(event.action || 'Timeline event')}</strong>
+                    <span>${escapeHtml(formatTimelineTimestamp(event.timestamp))}</span>
+                </div>
+                <p>${escapeHtml(event.note || 'No details available')}</p>
+                ${event.user && (event.user.name || event.user.email) ? `<span class="timeline-meta">By ${escapeHtml(event.user.name || event.user.email)}</span>` : ''}
+                ${event.log ? `<span class="timeline-meta">Log: ${escapeHtml(event.log.attackType || 'n/a')} from ${escapeHtml(event.log.sourceIP || 'n/a')}</span>` : ''}
+            </article>
+        `).join('')
+        : '<p class="empty-state">No timeline events found for this incident.</p>';
+
+    content.innerHTML = `
+        <div class="timeline-incident-summary">
+            <h4>${escapeHtml(incident.title || 'Incident')}</h4>
+            <p>${escapeHtml(incident.description || 'No description')}</p>
+            <div class="timeline-incident-meta">
+                <span class="badge badge-danger">${escapeHtml((incident.severity || 'medium').toUpperCase())}</span>
+                <span class="status-badge status-${escapeHtml(incident.status || 'open')}">${escapeHtml((incident.status || 'open').replace('_', ' ').toUpperCase())}</span>
+                <span>${escapeHtml(incident.sourceIP || 'N/A')}</span>
+                <span>${escapeHtml(incident.targetSystem || 'Unknown target')}</span>
+            </div>
+        </div>
+        <div class="timeline-stats">
+            <div class="timeline-stat"><strong>${events.length}</strong><span>timeline events</span></div>
+            <div class="timeline-stat"><strong>${relatedLogs.length}</strong><span>related logs</span></div>
+            <div class="timeline-stat"><strong>${incident.remediationSteps?.length || 0}</strong><span>remediation steps</span></div>
+        </div>
+        <div class="timeline-feed">
+            ${eventList}
+        </div>
+    `;
+}
+
+async function viewIncidentTimeline(id) {
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/incidents/${id}/timeline`, {
+            headers: getAuthHeaders()
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.message || 'Could not load incident timeline');
+        }
+
+        const modal = ensureIncidentTimelineModal();
+        renderIncidentTimeline(payload.incident || {});
+        modal.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+    } catch (error) {
+        console.error('Failed to load incident timeline:', error);
+        alert(error.message || 'Could not load incident timeline');
+    }
+}
+
+function closeIncidentTimelineModal() {
+    document.getElementById('incident-timeline-modal')?.classList.add('hidden');
+    document.body.style.overflow = '';
 }
 
 // Edit Incident
@@ -314,7 +682,7 @@ async function editIncident(id) {
                 throw new Error(payload.message || 'Status update failed');
             }
             await loadIncidents();
-            alert('Incident status updated!');
+            alert(isAdminUser() ? 'Incident updated!' : 'Incident status updated!');
         } catch (error) {
             console.error('Incident status update failed:', error);
             alert(error.message || 'Incident status update failed');
@@ -446,6 +814,37 @@ function renderAITriage(result, mode = 'fallback') {
     modal.classList.remove('hidden');
 }
 
+function renderAITriageLoading(title = 'AI Incident Triage', message = 'AI is thinking through the incident...') {
+    const modal = ensureAITriageModal();
+    const content = document.getElementById('ai-triage-content');
+    content.innerHTML = `
+        <div class="ai-loading-state">
+            <div class="ai-loading-orb"><i class="fas fa-brain"></i></div>
+            <h4>${escapeHtml(title)}</h4>
+            <p>${escapeHtml(message)}</p>
+            <div class="ai-loading-steps">
+                <span>Reviewing incident context</span>
+                <span>Checking severity and impact</span>
+                <span>Preparing response actions</span>
+            </div>
+        </div>
+    `;
+    modal.classList.remove('hidden');
+}
+
+function renderAITriageError(title = 'AI Incident Triage Failed', message = 'AI triage failed. Please check backend login/session.') {
+    const modal = ensureAITriageModal();
+    const content = document.getElementById('ai-triage-content');
+    content.innerHTML = `
+        <div class="ai-loading-state ai-error-state">
+            <div class="ai-loading-orb"><i class="fas fa-triangle-exclamation"></i></div>
+            <h4>${escapeHtml(title)}</h4>
+            <p>${escapeHtml(message)}</p>
+        </div>
+    `;
+    modal.classList.remove('hidden');
+}
+
 function closeAITriageModal() {
     document.getElementById('ai-triage-modal')?.classList.add('hidden');
 }
@@ -454,6 +853,7 @@ async function triageIncidentWithAI(id) {
     const incident = incidents.find(i => String(i.id) === String(id));
     if (!incident) return;
 
+    renderAITriageLoading(`AI Triage: ${incident.title || 'Incident'}`, 'AI is explaining this incident...');
     notifyIncidentAI('AI is explaining this incident...', 'info');
 
     try {
@@ -470,6 +870,7 @@ async function triageIncidentWithAI(id) {
         renderAITriage(payload.data, payload.mode);
     } catch (error) {
         console.error('AI incident triage failed:', error);
+        renderAITriageError(`AI Triage: ${incident.title || 'Incident'}`, error.message || 'AI triage failed. Please check backend login/session.');
         notifyIncidentAI(error.message || 'AI triage failed. Please check backend login/session.', 'error');
     }
 }
@@ -481,7 +882,12 @@ window.searchIncidents = searchIncidents;
 window.openNewIncidentModal = openNewIncidentModal;
 window.closeModal = closeModal;
 window.createNewIncident = createNewIncident;
+window.openAssignIncidentModal = openAssignIncidentModal;
+window.closeAssignIncidentModal = closeAssignIncidentModal;
+window.submitIncidentAssignment = submitIncidentAssignment;
 window.viewIncident = viewIncident;
+window.viewIncidentTimeline = viewIncidentTimeline;
+window.closeIncidentTimelineModal = closeIncidentTimelineModal;
 window.editIncident = editIncident;
 window.triageIncidentWithAI = triageIncidentWithAI;
 window.closeAITriageModal = closeAITriageModal;

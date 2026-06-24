@@ -6,13 +6,18 @@ const AI_PROVIDER = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'g
 const AI_BASE_URL = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
 const IS_OPENROUTER = AI_BASE_URL.includes('openrouter.ai');
 const AI_MODEL = process.env.AI_MODEL || (AI_PROVIDER === 'gemini' ? 'gemini-2.0-flash' : 'gpt-4o-mini');
-const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
+const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
 const AI_REQUIRE_PROVIDER = true;
+const AI_ALLOW_LOCAL_FALLBACK = String(process.env.AI_ALLOW_LOCAL_FALLBACK || 'false').toLowerCase() === 'true';
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 15000);
 const AI_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 450);
 const AI_FORCE_RESPONSE_FORMAT = String(process.env.AI_FORCE_RESPONSE_FORMAT || (!IS_OPENROUTER)).toLowerCase() === 'true';
+const AI_FALLBACK_MODELS = String(process.env.AI_FALLBACK_MODELS || '')
+  .split(',')
+  .map(model => model.trim())
+  .filter(Boolean);
 
 function redactSensitive(input) {
   const sensitiveKeys = /password|passwd|pwd|token|api[_-]?key|secret/i;
@@ -182,6 +187,17 @@ function fallbackChat(message = '', context = {}) {
   return `I reviewed the available MicroSOC context (${Object.keys(context || {}).join(', ') || 'no extra context'}). Recommended next step: triage open critical/high incidents, inspect related logs, and apply temporary containment before permanent remediation.`;
 }
 
+function fallbackChatPayload(message = '', context = {}) {
+  const answer = fallbackChat(message, context);
+  const nextActions = [
+    'Review the latest critical/high alerts',
+    'Inspect related logs and incident timelines',
+    'Apply temporary containment if the source is repeated'
+  ];
+
+  return normalizeChatData({ answer, nextActions }, { answer, nextActions });
+}
+
 async function fetchWithTimeout(url, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
@@ -203,7 +219,7 @@ async function callAiJson(systemPrompt, userPayload) {
   try {
     const content = AI_PROVIDER === 'gemini'
       ? await callGeminiJson(systemPrompt, safePayload)
-      : await callOpenAiJson(systemPrompt, safePayload);
+      : await callOpenAiJsonWithFallback(systemPrompt, safePayload);
 
     if (!content) throw new Error('AI provider returned empty content');
 
@@ -286,9 +302,31 @@ function normalizeChatData(data = {}, fallbackData = {}) {
   };
 }
 
-async function callOpenAiJson(systemPrompt, safePayload) {
+function getOpenAiModelCandidates() {
+  const candidates = [AI_MODEL, ...AI_FALLBACK_MODELS];
+  if (IS_OPENROUTER) {
+    candidates.push('openrouter/auto', 'openai/gpt-4o-mini');
+  } else {
+    candidates.push('gpt-4o-mini');
+  }
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function isLikelyModelError(errorBody = '') {
+  const text = String(errorBody).toLowerCase();
+  return [
+    'model',
+    'invalid',
+    'not found',
+    'unsupported',
+    'does not exist',
+    'not available'
+  ].some(fragment => text.includes(fragment));
+}
+
+async function callOpenAiJson(systemPrompt, safePayload, model = AI_MODEL) {
   const requestBody = {
-    model: AI_MODEL,
+    model,
     temperature: 0.2,
     max_tokens: AI_MAX_OUTPUT_TOKENS,
     messages: [
@@ -308,7 +346,7 @@ async function callOpenAiJson(systemPrompt, safePayload) {
       'Content-Type': 'application/json',
       ...(IS_OPENROUTER ? {
         'HTTP-Referer': process.env.FRONTEND_URL || 'http://localhost:5173',
-        'X-Title': 'MicroSOC Command Center'
+        'X-OpenRouter-Title': 'MicroSOC Command Center'
       } : {})
     },
     body: JSON.stringify(requestBody)
@@ -325,6 +363,28 @@ async function callOpenAiJson(systemPrompt, safePayload) {
     return content.map(part => part.text || part.content || '').join('');
   }
   return content;
+}
+
+async function callOpenAiJsonWithFallback(systemPrompt, safePayload) {
+  const candidates = getOpenAiModelCandidates();
+  let lastError = null;
+
+  for (const model of candidates) {
+    try {
+      const content = await callOpenAiJson(systemPrompt, safePayload, model);
+      if (content) {
+        return content;
+      }
+      lastError = new Error(`AI provider returned empty content for model ${model}`);
+    } catch (error) {
+      lastError = error;
+      if (!isLikelyModelError(error.message)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError || new Error('AI provider returned no usable content');
 }
 
 async function callGeminiJson(systemPrompt, safePayload) {
@@ -379,10 +439,22 @@ exports.explainLog = async (req, res) => {
     result.data = normalizeAiAnalysis(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
+    if (AI_ALLOW_LOCAL_FALLBACK) {
+      const input = req.body.log || req.body;
+      const fallback = normalizeAiAnalysis(fallbackLogExplanation(input));
+      console.warn('AI explain-log provider failed, using fallback:', error.message);
+      res.json({
+        success: true,
+        mode: 'fallback',
+        data: fallback,
+        providerError: error.message
+      });
+      return;
+    }
     res.status(502).json({
       success: false,
       mode: 'ai_error',
-      message: 'AI provider is unavailable or rejected the request',
+      message: 'AI provider rejected the request',
       detail: error.message
     });
   }
@@ -396,11 +468,14 @@ exports.status = async (req, res) => {
     success: true,
     provider: AI_PROVIDER,
     model: AI_MODEL,
+    fallbackModels: AI_FALLBACK_MODELS,
     baseUrl,
     hasProviderKey,
     requireProvider: AI_REQUIRE_PROVIDER,
     timeoutMs: AI_TIMEOUT_MS,
-    maxOutputTokens: AI_MAX_OUTPUT_TOKENS
+    maxOutputTokens: AI_MAX_OUTPUT_TOKENS,
+    openRouter: IS_OPENROUTER,
+    healthy: Boolean(hasProviderKey)
   });
 };
 
@@ -415,10 +490,22 @@ exports.triageIncident = async (req, res) => {
     result.data = normalizeAiAnalysis(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
+    if (AI_ALLOW_LOCAL_FALLBACK) {
+      const input = req.body.incident || req.body;
+      const fallback = normalizeAiAnalysis(fallbackIncidentTriage(input));
+      console.warn('AI triage provider failed, using fallback:', error.message);
+      res.json({
+        success: true,
+        mode: 'fallback',
+        data: fallback,
+        providerError: error.message
+      });
+      return;
+    }
     res.status(502).json({
       success: false,
       mode: 'ai_error',
-      message: 'AI provider is unavailable or rejected the request',
+      message: 'AI provider rejected the request',
       detail: error.message
     });
   }
@@ -434,10 +521,21 @@ exports.generateReport = async (req, res) => {
     result.data = normalizeReportData(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
+    if (AI_ALLOW_LOCAL_FALLBACK) {
+      const fallback = normalizeReportData(fallbackReport(req.body));
+      console.warn('AI report provider failed, using fallback:', error.message);
+      res.json({
+        success: true,
+        mode: 'fallback',
+        data: fallback,
+        providerError: error.message
+      });
+      return;
+    }
     res.status(502).json({
       success: false,
       mode: 'ai_error',
-      message: 'AI provider is unavailable or rejected the request',
+      message: 'AI provider rejected the request',
       detail: error.message
     });
   }
@@ -480,10 +578,21 @@ exports.chat = async (req, res) => {
     result.data = normalizeChatData(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
+    if (AI_ALLOW_LOCAL_FALLBACK) {
+      const fallback = fallbackChatPayload(message, payload.context);
+      console.warn('AI chat provider failed, using fallback:', error.message);
+      res.json({
+        success: true,
+        mode: 'fallback',
+        data: fallback,
+        providerError: error.message
+      });
+      return;
+    }
     res.status(502).json({
       success: false,
       mode: 'ai_error',
-      message: 'AI provider is unavailable or rejected the request',
+      message: 'AI provider rejected the request',
       detail: error.message
     });
   }
@@ -510,10 +619,32 @@ exports.naturalSearch = async (req, res) => {
 
     res.json({ success: true, ...result });
   } catch (error) {
+    if (AI_ALLOW_LOCAL_FALLBACK) {
+      const queryText = query.toLowerCase();
+      const fallback = {
+        query,
+        explanation: 'Used local MicroSOC fallback because the AI provider rejected the request.',
+        filters: {
+          severity: queryText.includes('critical') ? 'critical' : queryText.includes('high') ? 'high' : null,
+          blocked: queryText.includes('blocked') ? true : null,
+          attackType: queryText.includes('sql') ? 'SQL Injection' : queryText.includes('xss') ? 'XSS' : null,
+          sourceIP: /\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(query) ? query.match(/\b\d{1,3}(?:\.\d{1,3}){3}\b/)?.[0] : null,
+          requestId: crypto.randomUUID()
+        }
+      };
+      console.warn('AI natural-search provider failed, using fallback:', error.message);
+      res.json({
+        success: true,
+        mode: 'fallback',
+        data: fallback,
+        providerError: error.message
+      });
+      return;
+    }
     res.status(502).json({
       success: false,
       mode: 'ai_error',
-      message: 'AI provider is unavailable or rejected the request',
+      message: 'AI provider rejected the request',
       detail: error.message
     });
   }

@@ -3,11 +3,11 @@ const router = express.Router();
 const Incident = require("../models/Incident");
 const { protect } = require("../middleware/auth");
 
-// CREATE incident (admin + analyst only)
+// CREATE incident (admin only)
 router.post("/", protect, async (req, res) => {
     try {
-        if (!["admin", "analyst"].includes(req.user.role)) {
-            return res.status(403).json({ message: "Access denied" });
+        if (req.user.role !== "admin") {
+            return res.status(403).json({ message: "Only admins can create incidents." });
         }
 
         const incident = await Incident.create({
@@ -32,7 +32,10 @@ router.post("/", protect, async (req, res) => {
 
 // GET all incidents
 router.get("/", protect, async (req, res) => {
-    const incidents = await Incident.find().sort({ createdAt: -1 });
+    const query = req.user.role === 'admin'
+        ? {}
+        : { $or: [{ assignedTo: req.user.id }, { createdBy: req.user.id }] };
+    const incidents = await Incident.find(query).sort({ createdAt: -1 });
     res.json({ success: true, incidents });
 });
 

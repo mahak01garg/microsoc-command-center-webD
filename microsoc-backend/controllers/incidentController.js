@@ -1,6 +1,15 @@
 const Incident = require('../models/Incident');
 const Log = require('../models/Log');
 const User = require('../models/User');
+const { recordAuditEvent } = require('../utils/auditLogger');
+
+function canAccessIncident(incident, user) {
+  if (!incident || !user) return false;
+  if (user.role === 'admin') return true;
+  const assignedToId = incident.assignedTo?._id || incident.assignedTo?.id || incident.assignedTo;
+  const createdById = incident.createdBy?._id || incident.createdBy?.id || incident.createdBy;
+  return String(assignedToId || '') === String(user.id) || String(createdById || '') === String(user.id);
+}
 
 // @desc    Get all incidents
 // @route   GET /api/incidents
@@ -20,6 +29,13 @@ exports.getIncidents = async (req, res) => {
 
     // Build query
     const query = {};
+
+    if (req.user.role !== 'admin') {
+      query.$or = [
+        { assignedTo: req.user.id },
+        { createdBy: req.user.id }
+      ];
+    }
 
     // Status filter
     if (status && status !== 'all') {
@@ -44,11 +60,13 @@ exports.getIncidents = async (req, res) => {
 
     // Search filter
     if (search) {
-      query.$or = [
+      const searchClause = [
         { title: { $regex: search, $options: 'i' } },
         { description: { $regex: search, $options: 'i' } },
         { sourceIP: { $regex: search, $options: 'i' } }
       ];
+      query.$and = query.$and || [];
+      query.$and.push({ $or: searchClause });
     }
 
     // Sort
@@ -127,6 +145,13 @@ exports.getIncidentById = async (req, res) => {
       });
     }
 
+    if (!canAccessIncident(incident, req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Incident is outside your scope.'
+      });
+    }
+
     res.status(200).json({
       success: true,
       incident
@@ -140,16 +165,99 @@ exports.getIncidentById = async (req, res) => {
   }
 };
 
+// @desc    Get incident timeline
+// @route   GET /api/incidents/:id/timeline
+// @access  Private
+exports.getIncidentTimeline = async (req, res) => {
+  try {
+    const incident = await Incident.findById(req.params.id)
+      .populate('createdBy', 'name email avatar')
+      .populate('assignedTo', 'name email avatar')
+      .populate('relatedLogs', 'timestamp attackType sourceIP severity description targetSystem')
+      .populate('timeline.user', 'name email avatar')
+      .populate('remediationSteps.assignedTo', 'name email avatar');
+
+    if (!incident) {
+      return res.status(404).json({
+        success: false,
+        message: 'Incident not found'
+      });
+    }
+
+    if (!canAccessIncident(incident, req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Incident is outside your scope.'
+      });
+    }
+
+    const timelineEvents = [
+      {
+        type: 'incident_created',
+        action: 'Incident created',
+        note: incident.description,
+        timestamp: incident.createdAt,
+        user: incident.createdBy,
+        source: 'incident'
+      },
+      ...(incident.timeline || []).map(event => ({
+        type: 'timeline_event',
+        action: event.action,
+        note: event.note,
+        timestamp: event.timestamp,
+        user: event.user,
+        attachments: event.attachments || [],
+        source: 'timeline'
+      })),
+      ...(incident.relatedLogs || []).map(log => ({
+        type: 'related_log',
+        action: `Log observed: ${log.attackType}`,
+        note: `${log.sourceIP} -> ${log.targetSystem} | ${log.description}`,
+        timestamp: log.timestamp,
+        log,
+        source: 'log'
+      })),
+      ...(incident.remediationSteps || []).map(step => ({
+        type: 'remediation_step',
+        action: `Remediation step ${step.status}`,
+        note: step.step,
+        timestamp: step.completedAt || step.deadline || incident.updatedAt,
+        user: step.assignedTo,
+        source: 'remediation'
+      }))
+    ]
+      .filter(event => event.timestamp)
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+    res.status(200).json({
+      success: true,
+      incident: {
+        ...incident.toObject(),
+        timelineEvents
+      }
+    });
+  } catch (error) {
+    console.error('Get incident timeline error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
 // @desc    Create new incident
 // @route   POST /api/incidents
 // @access  Private
 exports.createIncident = async (req, res) => {
   try {
-    const incidentData = { ...req.body };
-
     if (req.user.role !== 'admin') {
-      delete incidentData.assignedTo;
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can create incidents.'
+      });
     }
+
+    const incidentData = { ...req.body };
     
     // Set created by
     incidentData.createdBy = req.user.id;
@@ -169,6 +277,20 @@ exports.createIncident = async (req, res) => {
       .populate('createdBy', 'name email')
       .populate('assignedTo', 'name email');
 
+    await recordAuditEvent(req, {
+      action: 'Incident Created',
+      module: 'incidents',
+      targetType: 'Incident',
+      targetId: String(populatedIncident._id),
+      targetLabel: populatedIncident.title,
+      details: `Created incident "${populatedIncident.title}"`,
+      metadata: {
+        severity: populatedIncident.severity,
+        status: populatedIncident.status,
+        sourceIP: populatedIncident.sourceIP
+      }
+    });
+
     res.status(201).json({
       success: true,
       incident: populatedIncident
@@ -187,13 +309,15 @@ exports.createIncident = async (req, res) => {
 // @access  Private
 exports.updateIncident = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can edit incidents.'
+      });
+    }
+
     const { id } = req.params;
     const updateData = { ...req.body };
-
-    if (req.user.role !== 'admin') {
-      delete updateData.assignedTo;
-      delete updateData.createdBy;
-    }
 
     const incident = await Incident.findById(id);
 
@@ -222,6 +346,16 @@ exports.updateIncident = async (req, res) => {
       .populate('assignedTo', 'name email')
       .populate('createdBy', 'name email');
 
+    await recordAuditEvent(req, {
+      action: 'Incident Updated',
+      module: 'incidents',
+      targetType: 'Incident',
+      targetId: String(incident._id),
+      targetLabel: incident.title,
+      details: `Updated incident "${incident.title}"`,
+      metadata: { updatedFields: Object.keys(updateData) }
+    });
+
     res.status(200).json({
       success: true,
       incident: populatedIncident
@@ -240,9 +374,16 @@ exports.updateIncident = async (req, res) => {
 // @access  Private
 exports.deleteIncident = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can delete incidents.'
+      });
+    }
+
     const { id } = req.params;
 
-    const incident = await Incident.findByIdAndDelete(id);
+    const incident = await Incident.findById(id);
 
     if (!incident) {
       return res.status(404).json({
@@ -250,6 +391,25 @@ exports.deleteIncident = async (req, res) => {
         message: 'Incident not found'
       });
     }
+
+    if (!canAccessIncident(incident, req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Incident is outside your scope.'
+      });
+    }
+
+    await Incident.findByIdAndDelete(id);
+
+    await recordAuditEvent(req, {
+      action: 'Incident Deleted',
+      module: 'incidents',
+      targetType: 'Incident',
+      targetId: String(id),
+      targetLabel: incident.title,
+      details: `Deleted incident "${incident.title}"`,
+      metadata: { severity: incident.severity, status: incident.status }
+    });
 
     res.status(200).json({
       success: true,
@@ -273,11 +433,19 @@ exports.updateStatus = async (req, res) => {
     const { status, note } = req.body;
 
     const incident = await Incident.findById(id);
+    const oldStatus = incident?.status;
 
     if (!incident) {
       return res.status(404).json({
         success: false,
         message: 'Incident not found'
+      });
+    }
+
+    if (!canAccessIncident(incident, req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Incident is outside your scope.'
       });
     }
 
@@ -287,6 +455,16 @@ exports.updateStatus = async (req, res) => {
     const populatedIncident = await Incident.findById(id)
       .populate('assignedTo', 'name email')
       .populate('createdBy', 'name email');
+
+    await recordAuditEvent(req, {
+      action: 'Incident Status Changed',
+      module: 'incidents',
+      targetType: 'Incident',
+      targetId: String(incident._id),
+      targetLabel: incident.title,
+      details: `Status changed from ${oldStatus} to ${status} for "${incident.title}"`,
+      metadata: { status, note }
+    });
 
     res.status(200).json({
       success: true,
@@ -306,6 +484,13 @@ exports.updateStatus = async (req, res) => {
 // @access  Private
 exports.assignIncident = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can assign incidents.'
+      });
+    }
+
     const { id } = req.params;
     const { userId, note } = req.body;
 
@@ -349,6 +534,18 @@ exports.assignIncident = async (req, res) => {
       .populate('assignedTo', 'name email avatar')
       .populate('createdBy', 'name email');
 
+    await recordAuditEvent(req, {
+      action: 'Incident Assigned',
+      module: 'incidents',
+      targetType: 'Incident',
+      targetId: String(incident._id),
+      targetLabel: incident.title,
+      details: userId
+        ? `Incident assigned to ${userId}`
+        : `Incident unassigned`,
+      metadata: { userId: userId || null, note: note || '' }
+    });
+
     res.status(200).json({
       success: true,
       incident: populatedIncident
@@ -379,6 +576,13 @@ exports.addTimelineEvent = async (req, res) => {
       });
     }
 
+    if (!canAccessIncident(incident, req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Incident is outside your scope.'
+      });
+    }
+
     // Add timeline event
     await incident.addTimelineEvent(
       action,
@@ -389,6 +593,16 @@ exports.addTimelineEvent = async (req, res) => {
 
     const populatedIncident = await Incident.findById(id)
       .populate('timeline.user', 'name email avatar');
+
+    await recordAuditEvent(req, {
+      action: 'Timeline Note Added',
+      module: 'incidents',
+      targetType: 'Incident',
+      targetId: String(incident._id),
+      targetLabel: incident.title,
+      details: `Added timeline note to "${incident.title}"`,
+      metadata: { timelineAction: action, hasAttachments: attachments.length > 0 }
+    });
 
     res.status(200).json({
       success: true,
@@ -408,6 +622,13 @@ exports.addTimelineEvent = async (req, res) => {
 // @access  Private
 exports.addRemediationStep = async (req, res) => {
   try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can add remediation steps.'
+      });
+    }
+
     const { id } = req.params;
     const { step, assignedTo, deadline, notes } = req.body;
 
@@ -440,6 +661,16 @@ exports.addRemediationStep = async (req, res) => {
 
     const populatedIncident = await Incident.findById(id)
       .populate('remediationSteps.assignedTo', 'name email');
+
+    await recordAuditEvent(req, {
+      action: 'Remediation Step Added',
+      module: 'incidents',
+      targetType: 'Incident',
+      targetId: String(incident._id),
+      targetLabel: incident.title,
+      details: `Added remediation step to "${incident.title}"`,
+      metadata: { step, assignedTo, deadline }
+    });
 
     res.status(200).json({
       success: true,
@@ -524,6 +755,16 @@ exports.exportIncident = async (req, res) => {
       res.setHeader('Content-Disposition', `attachment; filename=incident-${incident._id}-${new Date().toISOString().split('T')[0]}.json`);
       res.send(JSON.stringify(incident, null, 2));
     }
+
+    await recordAuditEvent(req, {
+      action: 'Incident Report Exported',
+      module: 'incidents',
+      targetType: 'Incident',
+      targetId: String(incident._id),
+      targetLabel: incident.title,
+      details: `Exported incident report as ${format.toUpperCase()}`,
+      metadata: { format }
+    });
   } catch (error) {
     console.error('Export incident error:', error);
     res.status(500).json({

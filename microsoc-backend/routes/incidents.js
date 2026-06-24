@@ -21,15 +21,20 @@ router.get('/stats', incidentController.getIncidentStats);
 // @access  Private
 router.get('/:id', incidentController.getIncidentById);
 
+// @route   GET /api/incidents/:id/timeline
+// @desc    Get incident timeline and related activity
+// @access  Private
+router.get('/:id/timeline', incidentController.getIncidentTimeline);
+
 // @route   POST /api/incidents
 // @desc    Create new incident
-// @access  Private
-router.post('/', incidentController.createIncident);
+// @access  Admin
+router.post('/', authorizeRoles('admin'), incidentController.createIncident);
 
 // @route   PUT /api/incidents/:id
 // @desc    Update incident
-// @access  Private
-router.put('/:id', incidentController.updateIncident);
+// @access  Admin
+router.put('/:id', authorizeRoles('admin'), incidentController.updateIncident);
 
 // @route   DELETE /api/incidents/:id
 // @desc    Delete incident
@@ -53,8 +58,8 @@ router.post('/:id/timeline', incidentController.addTimelineEvent);
 
 // @route   POST /api/incidents/:id/remediation
 // @desc    Add remediation step
-// @access  Private
-router.post('/:id/remediation', incidentController.addRemediationStep);
+// @access  Admin
+router.post('/:id/remediation', authorizeRoles('admin'), incidentController.addRemediationStep);
 
 // @route   GET /api/incidents/:id/export
 // @desc    Export incident report
