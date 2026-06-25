@@ -14,8 +14,7 @@ const SystemSettingsSchema = new mongoose.Schema({
   },
   alertConfig: {
     failedLoginThreshold: { type: Number, default: 5, min: 1, max: 100 },
-    portScanThreshold: { type: Number, default: 10, min: 1, max: 1000 },
-    ddosThreshold: { type: Number, default: 1000, min: 10, max: 100000 }
+    otherAlertsThreshold: { type: Number, default: 1, min: 1, max: 1000 }
   },
   incidentConfig: {
     createIncidentAfter: { type: Number, default: 3, min: 1, max: 20 },

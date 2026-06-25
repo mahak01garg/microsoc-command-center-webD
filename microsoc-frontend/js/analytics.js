@@ -11,10 +11,13 @@ let analyticsData = {
     anomalies: [],
     remediations: [],
     predictions: [],
+    clusters: [],
     aiInsights: []
 };
 
 const LOG_STORAGE_KEY = 'microsocSecurityLogs';
+let analyticsLogCache = [];
+let analyticsLogsReady = false;
 
 function getCurrentUserRole() {
     try {
@@ -43,20 +46,131 @@ function getStoredSecurityLogs() {
     }
 }
 
+function getAnalyticsAuthHeaders() {
+    return {
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
+        'Cache-Control': 'no-cache'
+    };
+}
+
+function ensureAnalyticsAllTimeOption() {
+    const select = document.getElementById('time-period');
+    if (!select) return;
+
+    const hadAllTime = Boolean(select.querySelector('option[value="all"]'));
+    if (!select.querySelector('option[value="all"]')) {
+        const option = document.createElement('option');
+        option.value = 'all';
+        option.textContent = 'All Time';
+        select.insertBefore(option, select.firstChild);
+    }
+
+    if (!hadAllTime || !sessionStorage.getItem('microsocAnalyticsTimeTouched')) {
+        select.value = 'all';
+    }
+
+    if (!select.dataset.analyticsTimeSynced) {
+        select.addEventListener('change', () => {
+            sessionStorage.setItem('microsocAnalyticsTimeTouched', 'true');
+        });
+        select.dataset.analyticsTimeSynced = 'true';
+    }
+}
+
+function normalizeAnalyticsLog(log) {
+    return {
+        ...log,
+        id: log.id || log._id,
+        timestamp: log.timestamp || log.createdAt || new Date().toISOString(),
+        attackType: log.attackType || 'Other',
+        sourceIP: log.sourceIP || 'Unknown',
+        targetSystem: log.targetSystem || 'Unknown',
+        severity: String(log.severity || 'medium').toLowerCase(),
+        country: log.country || 'Unknown',
+        isBlocked: Boolean(log.isBlocked)
+    };
+}
+
+function getAnalyticsLogId(log) {
+    return String(log?._id || log?.id || `${log?.timestamp || ''}-${log?.sourceIP || ''}-${log?.attackType || ''}`);
+}
+
+function mergeAnalyticsLogs(...logGroups) {
+    const merged = new Map();
+    logGroups.flat().filter(Boolean).forEach((log) => {
+        const normalized = normalizeAnalyticsLog(log);
+        const id = getAnalyticsLogId(normalized);
+        merged.set(id, { ...(merged.get(id) || {}), ...normalized });
+    });
+    return Array.from(merged.values()).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+}
+
+function syncAnalyticsLogsFromStorage() {
+    analyticsLogCache = mergeAnalyticsLogs(analyticsLogCache, getStoredSecurityLogs());
+    analyticsLogsReady = true;
+}
+
+async function fetchAnalyticsLogsFromBackend() {
+    const firstUrl = `${getApiBaseUrl()}/logs?limit=5000&page=1&timeRange=all&sortBy=timestamp&sortOrder=desc&_=${Date.now()}`;
+    const firstResponse = await fetch(firstUrl, {
+        headers: getAnalyticsAuthHeaders(),
+        cache: 'no-store'
+    });
+    const firstPayload = await firstResponse.json();
+    if (!firstResponse.ok || !firstPayload.success) {
+        throw new Error(firstPayload.message || 'Could not load analytics logs');
+    }
+
+    const logs = Array.isArray(firstPayload.logs) ? [...firstPayload.logs] : [];
+    const totalPages = Math.max(1, Number(firstPayload.totalPages) || 1);
+
+    if (totalPages > 1) {
+        const remainingPages = Array.from({ length: totalPages - 1 }, (_, index) => index + 2);
+        const pages = await Promise.all(remainingPages.map(async (page) => {
+            const response = await fetch(`${getApiBaseUrl()}/logs?limit=5000&page=${page}&timeRange=all&sortBy=timestamp&sortOrder=desc&_=${Date.now()}`, {
+                headers: getAnalyticsAuthHeaders(),
+                cache: 'no-store'
+            });
+            const payload = await response.json();
+            return response.ok && payload.success && Array.isArray(payload.logs) ? payload.logs : [];
+        }));
+        pages.forEach(pageLogs => logs.push(...pageLogs));
+    }
+
+    return logs.map(normalizeAnalyticsLog);
+}
+
+async function hydrateAnalyticsLogs() {
+    const storedLogs = getStoredSecurityLogs().map(normalizeAnalyticsLog);
+    try {
+        const backendLogs = await fetchAnalyticsLogsFromBackend();
+        analyticsLogCache = mergeAnalyticsLogs(backendLogs, storedLogs);
+        analyticsLogsReady = true;
+        localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(analyticsLogCache));
+    } catch (error) {
+        console.warn('Analytics backend log sync failed, using local cache:', error);
+        analyticsLogCache = mergeAnalyticsLogs(analyticsLogCache, storedLogs);
+        analyticsLogsReady = true;
+    }
+}
+
 function getAnalyticsTimeWindow() {
-    const value = document.getElementById('time-period')?.value || '7d';
+    const value = document.getElementById('time-period')?.value || 'all';
     const now = Date.now();
     const windows = {
         '24h': 24 * 60 * 60 * 1000,
         '7d': 7 * 24 * 60 * 60 * 1000,
-        '30d': 30 * 24 * 60 * 60 * 1000
+        '30d': 30 * 24 * 60 * 60 * 1000,
+        '90d': 90 * 24 * 60 * 60 * 1000
     };
-    return { value, since: now - (windows[value] || windows['7d']) };
+    return { value, since: value === 'all' ? null : now - (windows[value] || windows['7d']) };
 }
 
 function getAnalyticsLogs() {
     const { since } = getAnalyticsTimeWindow();
-    return getStoredSecurityLogs().filter(log => new Date(log.timestamp).getTime() >= since);
+    const logs = analyticsLogsReady ? analyticsLogCache : getStoredSecurityLogs().map(normalizeAnalyticsLog);
+    if (!since) return logs;
+    return logs.filter(log => new Date(log.timestamp).getTime() >= since);
 }
 
 function countBy(items, keyGetter) {
@@ -75,25 +189,42 @@ function formatEmptyState(message) {
     return `<div style="padding: 18px; color: var(--text-secondary);">${escapeHtml(message)}</div>`;
 }
 
+function renderAnalyticsWidgets(options = {}) {
+    loadAnalyticsData();
+    if (attackDistributionChart instanceof Chart) {
+        attackDistributionChart.data = analyticsData.attackDistribution;
+        attackDistributionChart.update();
+        createAttackDistributionLegend();
+    }
+    if (window.threatTimelineChart instanceof Chart) {
+        window.threatTimelineChart.data = analyticsData.threatTimeline;
+        window.threatTimelineChart.update();
+    }
+    loadClusterDetection();
+    loadAnomalies();
+    loadPredictions();
+    updateAnalyticsStats();
+
+    if (options.notify) {
+        showNotification('Analytics synced with backend security logs', 'success');
+    }
+}
+
 // Initialize Analytics
 function initAnalytics() {
+    ensureAnalyticsAllTimeOption();
+    removeThreatFeedWidget();
+    removeRetiredAnalyticsWidgets();
+    ensureClusterDetectionWidget();
     loadAnalyticsData();
     
     // Initialize charts
     initCharts();
     
-    // Load patterns
-    loadPatterns();
-    
-    // Load top sources
-    loadTopSources();
-    
     // Load anomalies
+    loadClusterDetection();
     loadAnomalies();
-    
-    // Load remediations
-    loadRemediations();
-    
+
     // Load predictions
     loadPredictions();
     
@@ -104,8 +235,21 @@ function initAnalytics() {
     updateAnalyticsStats();
     syncAnalyticsRoleUi();
 
-    window.addEventListener('microsoc:logs-updated', updateAnalytics);
+    syncAnalyticsLogsFromStorage();
+    renderAnalyticsWidgets();
+    hydrateAnalyticsLogs().then(() => renderAnalyticsWidgets());
 
+    window.addEventListener('microsoc:logs-updated', () => {
+        syncAnalyticsLogsFromStorage();
+        renderAnalyticsWidgets();
+        hydrateAnalyticsLogs().then(() => renderAnalyticsWidgets());
+    });
+
+    window.addEventListener('storage', event => {
+        if (event.key !== LOG_STORAGE_KEY) return;
+        syncAnalyticsLogsFromStorage();
+        renderAnalyticsWidgets();
+    });
 }
 
 function syncAnalyticsRoleUi() {
@@ -144,7 +288,9 @@ function loadAnalyticsData() {
         ? Array.from({ length: 6 }, (_, index) => `${String(index * 4).padStart(2, '0')}:00`)
         : value === '30d'
             ? ['Week 1', 'Week 2', 'Week 3', 'Week 4']
-            : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            : value === 'all'
+                ? buildAllTimeTimelineLabels(logs)
+                : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const severities = ['critical', 'high', 'medium'];
 
     analyticsData.threatTimeline = {
@@ -159,6 +305,19 @@ function loadAnalyticsData() {
     };
 }
 
+function formatTimelineDateLabel(date) {
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function buildAllTimeTimelineLabels(logs) {
+    const labels = [...new Set((Array.isArray(logs) ? logs : [])
+        .map(log => new Date(log.timestamp))
+        .filter(date => !Number.isNaN(date.getTime()))
+        .sort((a, b) => a - b)
+        .map(formatTimelineDateLabel))];
+    return labels.length ? labels.slice(-10) : ['No logs'];
+}
+
 function buildTimelineSeries(logs, labels, period, severity) {
     const counts = labels.map(() => 0);
     logs
@@ -171,12 +330,60 @@ function buildTimelineSeries(logs, labels, period, severity) {
             } else if (period === '30d') {
                 index = Math.min(labels.length - 1, Math.floor((Date.now() - date.getTime()) / (7 * 24 * 60 * 60 * 1000)));
                 index = labels.length - 1 - index;
+            } else if (period === 'all') {
+                index = labels.indexOf(formatTimelineDateLabel(date));
             } else {
                 index = date.getDay();
             }
-            counts[index] += 1;
+            if (index >= 0) {
+                counts[index] += 1;
+            }
         });
     return counts;
+}
+
+function normalizeAnalyticsCountryKey(country) {
+    const raw = String(country || 'Unknown').trim();
+    const upper = raw.toUpperCase();
+    const aliases = {
+        USA: 'US',
+        'UNITED STATES': 'US',
+        'UNITED STATES OF AMERICA': 'US',
+        CHINA: 'CN',
+        RUSSIA: 'RU',
+        GERMANY: 'DE',
+        INDIA: 'IN',
+        BRAZIL: 'BR',
+        JAPAN: 'JP',
+        'UNITED KINGDOM': 'UK',
+        UK: 'UK',
+        FRANCE: 'FR',
+        KOREA: 'KR',
+        'SOUTH KOREA': 'KR'
+    };
+    return aliases[upper] || upper;
+}
+
+function getAnalyticsCountryName(country) {
+    const key = normalizeAnalyticsCountryKey(country);
+    const names = {
+        US: 'United States',
+        CN: 'China',
+        RU: 'Russia',
+        DE: 'Germany',
+        IN: 'India',
+        BR: 'Brazil',
+        JP: 'Japan',
+        UK: 'United Kingdom',
+        FR: 'France',
+        KR: 'South Korea'
+    };
+    return names[key] || String(country || 'Unknown');
+}
+
+function getAnalyticsCountryFlag(country) {
+    const key = normalizeAnalyticsCountryKey(country);
+    return typeof getCountryFlag === 'function' ? getCountryFlag(key) : '🌍';
 }
 
 // Initialize Charts
@@ -274,6 +481,281 @@ function createAttackDistributionLegend() {
     }).join('');
 }
 
+function removeThreatFeedWidget() {
+    document.getElementById('threatFeed')?.closest('.threat-feed')?.remove();
+    document.getElementById('analytics-threat-feed-styles')?.remove();
+}
+
+function removeRetiredAnalyticsWidgets() {
+    [
+        'patterns-list',
+        'top-sources',
+        'remediation-container'
+    ].forEach((id) => {
+        document.getElementById(id)?.closest('.card')?.remove();
+    });
+
+    document.getElementById('geo-map-modal')?.remove();
+    document.getElementById('pattern-detail-modal')?.remove();
+}
+
+function ensureClusterDetectionWidget() {
+    if (document.getElementById('cluster-detection-container')) return;
+
+    const timelineCard = document.getElementById('threatTimelineChart')?.closest('.card');
+    if (!timelineCard) return;
+    ensureClusterDetectionStyles();
+
+    const card = document.createElement('div');
+    card.className = 'card cluster-detection-card';
+    card.innerHTML = `
+        <div class="card-header">
+            <h3><i class="fas fa-object-group"></i> Cluster Detection</h3>
+            <span class="badge badge-info" id="clusters-detected">0 clusters</span>
+        </div>
+        <div class="card-body">
+            <div class="cluster-detection-container" id="cluster-detection-container"></div>
+        </div>
+    `;
+    timelineCard.after(card);
+}
+
+function ensureClusterDetectionStyles() {
+    if (document.getElementById('analytics-cluster-detection-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'analytics-cluster-detection-styles';
+    style.textContent = `
+        .cluster-detection-container {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-height: 330px;
+            overflow-y: auto;
+        }
+
+        .cluster-item {
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            background: var(--bg-secondary);
+            padding: 14px;
+            color: var(--text-primary);
+        }
+
+        .cluster-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 14px;
+            align-items: flex-start;
+            margin-bottom: 10px;
+        }
+
+        .cluster-head strong {
+            color: var(--text-primary);
+            font-size: 15px;
+        }
+
+        .cluster-head p {
+            margin: 5px 0 0;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .cluster-severity {
+            border-radius: 999px;
+            padding: 4px 10px;
+            background: rgba(34, 211, 238, 0.14);
+            color: #0891b2;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            white-space: nowrap;
+        }
+
+        .cluster-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px 14px;
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function buildAttackClusters(logs, windowMinutes = 10, minEvents = 3) {
+    const windowMs = windowMinutes * 60 * 1000;
+    const normalizedLogs = (Array.isArray(logs) ? logs : [])
+        .map(normalizeAnalyticsLog)
+        .filter(log => log.attackType && !Number.isNaN(new Date(log.timestamp).getTime()));
+
+    const createGroupedClusters = (keyGetter, type) => {
+        const grouped = new Map();
+        normalizedLogs.forEach((log) => {
+            const key = keyGetter(log);
+            if (!key) return;
+            const current = grouped.get(key) || [];
+            current.push(log);
+            grouped.set(key, current);
+        });
+
+        const clusters = [];
+        grouped.forEach((items) => {
+            const sorted = items.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+            let index = 0;
+
+            while (index < sorted.length) {
+                const startTime = new Date(sorted[index].timestamp).getTime();
+                let endIndex = index;
+                while (
+                    endIndex + 1 < sorted.length &&
+                    new Date(sorted[endIndex + 1].timestamp).getTime() - startTime <= windowMs
+                ) {
+                    endIndex += 1;
+                }
+
+                const windowItems = sorted.slice(index, endIndex + 1);
+                if (windowItems.length >= minEvents) {
+                    const latest = windowItems[windowItems.length - 1];
+                    const highestSeverity = ['critical', 'high', 'medium', 'low'].find(level =>
+                        windowItems.some(log => log.severity === level)
+                    ) || 'medium';
+                    const sourceIPs = [...new Set(windowItems.map(log => log.sourceIP).filter(Boolean))];
+                    clusters.push({
+                        id: `${type}-${latest.attackType}-${sourceIPs[0] || 'multi'}-${windowItems[0].timestamp}-${latest.timestamp}`,
+                        type,
+                        attackType: latest.attackType,
+                        sourceIP: type === 'source' ? sourceIPs[0] : `${sourceIPs.length} sources`,
+                        sourceIPs,
+                        targetSystems: [...new Set(windowItems.map(log => log.targetSystem).filter(Boolean))],
+                        country: latest.country || 'Unknown',
+                        events: windowItems.length,
+                        windowMinutes,
+                        firstSeen: windowItems[0].timestamp,
+                        lastSeen: latest.timestamp,
+                        severity: highestSeverity
+                    });
+                    index = endIndex + 1;
+                } else {
+                    index += 1;
+                }
+            }
+        });
+        return clusters;
+    };
+
+    const sourceClusters = createGroupedClusters(
+        log => log.sourceIP ? `${String(log.attackType).toLowerCase()}|${log.sourceIP}` : null,
+        'source'
+    );
+    const attackWaveClusters = createGroupedClusters(
+        log => String(log.attackType).toLowerCase(),
+        'attack-wave'
+    );
+
+    const unique = new Map();
+    [...sourceClusters, ...attackWaveClusters]
+        .sort((a, b) => {
+            if (a.type !== b.type) return a.type === 'source' ? -1 : 1;
+            return b.events - a.events || new Date(b.lastSeen) - new Date(a.lastSeen);
+        })
+        .forEach(cluster => {
+            const key = `${cluster.type}|${cluster.attackType}|${cluster.sourceIP}|${cluster.firstSeen}|${cluster.lastSeen}`;
+            if (!unique.has(key)) unique.set(key, cluster);
+        });
+
+    const windowClusters = Array.from(unique.values()).slice(0, 6);
+    if (windowClusters.length) return windowClusters;
+
+    const historicalGroups = new Map();
+    normalizedLogs.forEach((log) => {
+        const key = String(log.attackType || 'Other').toLowerCase();
+        const current = historicalGroups.get(key) || [];
+        current.push(log);
+        historicalGroups.set(key, current);
+    });
+
+    return Array.from(historicalGroups.values())
+        .filter(items => items.length >= minEvents)
+        .map((items) => {
+            const sorted = items.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+            const latest = sorted[sorted.length - 1];
+            const sourceIPs = [...new Set(sorted.map(log => log.sourceIP).filter(Boolean))];
+            const highestSeverity = ['critical', 'high', 'medium', 'low'].find(level =>
+                sorted.some(log => log.severity === level)
+            ) || 'medium';
+
+            return {
+                id: `historical-${latest.attackType}-${latest.timestamp}`,
+                type: 'historical-attack-wave',
+                attackType: latest.attackType,
+                sourceIP: `${sourceIPs.length} sources`,
+                sourceIPs,
+                targetSystems: [...new Set(sorted.map(log => log.targetSystem).filter(Boolean))],
+                country: latest.country || 'Unknown',
+                events: sorted.length,
+                windowMinutes: null,
+                windowLabel: 'selected log window',
+                firstSeen: sorted[0].timestamp,
+                lastSeen: latest.timestamp,
+                severity: highestSeverity
+            };
+        })
+        .sort((a, b) => b.events - a.events || new Date(b.lastSeen) - new Date(a.lastSeen))
+        .slice(0, 6);
+}
+
+function loadClusterDetection() {
+    ensureClusterDetectionWidget();
+    const container = document.getElementById('cluster-detection-container');
+    if (!container) return;
+
+    const clusters = buildAttackClusters(getAnalyticsLogs());
+    analyticsData.clusters = clusters;
+
+    const badge = document.getElementById('clusters-detected');
+    if (badge) {
+        badge.textContent = `${clusters.length} cluster${clusters.length === 1 ? '' : 's'}`;
+    }
+
+    if (!clusters.length) {
+        container.innerHTML = formatEmptyState('No clusters yet. Need 3+ related attack events in the selected logs.');
+        return;
+    }
+
+    container.innerHTML = clusters.map((cluster) => {
+        const isSourceCluster = cluster.type === 'source';
+        const windowLabel = cluster.windowLabel || `${cluster.windowMinutes} min`;
+        const sourceCount = cluster.sourceIPs?.length || 0;
+        const title = isSourceCluster
+            ? `${cluster.attackType} Source Cluster Detected`
+            : `${cluster.attackType} Attack Wave Detected`;
+        const summary = isSourceCluster
+            ? `${cluster.events} related events from ${cluster.sourceIP} in ${windowLabel}`
+            : `${cluster.events} related events across ${sourceCount} sources in ${windowLabel}`;
+        const sourceMeta = isSourceCluster
+            ? `IP: ${cluster.sourceIP}`
+            : `Sources: ${sourceCount}`;
+
+        return `
+            <article class="cluster-item">
+                <div class="cluster-head">
+                    <div>
+                        <strong>${escapeHtml(title)}</strong>
+                        <p>${escapeHtml(summary)}</p>
+                    </div>
+                    <span class="cluster-severity">${escapeHtml(cluster.severity.toUpperCase())}</span>
+                </div>
+                <div class="cluster-meta">
+                    <span><i class="fas fa-network-wired"></i> ${escapeHtml(sourceMeta)}</span>
+                    <span><i class="fas fa-layer-group"></i> Events: ${cluster.events}</span>
+                    <span><i class="fas fa-clock"></i> ${escapeHtml(timeAgo(cluster.lastSeen))}</span>
+                    <span><i class="fas fa-server"></i> ${escapeHtml(cluster.targetSystems.slice(0, 2).join(', ') || 'Unknown target')}</span>
+                </div>
+            </article>
+        `;
+    }).join('');
+}
+
 // Toggle Timeline View
 function toggleTimelineView() {
     if (!window.threatTimelineChart) return;
@@ -289,7 +771,7 @@ function toggleTimelineView() {
 function loadPatterns() {
     const logs = getAnalyticsLogs();
     const byType = countBy(logs, log => log.attackType);
-    const byCountry = countBy(logs, log => log.country);
+    const byCountry = countBy(logs, log => normalizeAnalyticsCountryKey(log.country));
     const patterns = Object.entries(byType)
         .filter(([, count]) => count >= 2)
         .map(([type, count], index) => {
@@ -309,11 +791,12 @@ function loadPatterns() {
 
     const countryCluster = Object.entries(byCountry).sort((a, b) => b[1] - a[1])[0];
     if (countryCluster && countryCluster[1] >= 3) {
+        const countryName = getAnalyticsCountryName(countryCluster[0]);
         patterns.push({
             id: patterns.length + 1,
-            name: `${countryCluster[0]} source concentration`,
+            name: `${countryName} source concentration`,
             confidence: Math.min(95, 55 + countryCluster[1] * 5),
-            description: `${countryCluster[1]} events came from ${countryCluster[0]} in the selected time window`,
+            description: `${countryCluster[1]} events came from ${countryName} in the selected time window`,
             type: 'Geographic',
             frequency: `${countryCluster[1]} events`,
             timeframe: document.getElementById('time-period')?.selectedOptions?.[0]?.textContent || 'Selected window',
@@ -405,10 +888,12 @@ function createIncidentFromPattern() {
 function loadTopSources() {
     const logs = getAnalyticsLogs();
     const grouped = logs.reduce((acc, log) => {
-        acc[log.sourceIP] = acc[log.sourceIP] || { ip: log.sourceIP, country: log.country, attacks: 0, lastSeen: log.timestamp };
-        acc[log.sourceIP].attacks += 1;
-        if (new Date(log.timestamp) > new Date(acc[log.sourceIP].lastSeen)) {
-            acc[log.sourceIP].lastSeen = log.timestamp;
+        const key = log.sourceIP || 'Unknown';
+        acc[key] = acc[key] || { ip: key, country: log.country, attacks: 0, lastSeen: log.timestamp };
+        acc[key].attacks += 1;
+        if (new Date(log.timestamp) > new Date(acc[key].lastSeen)) {
+            acc[key].lastSeen = log.timestamp;
+            acc[key].country = log.country;
         }
         return acc;
     }, {});
@@ -422,7 +907,7 @@ function loadTopSources() {
     container.innerHTML = sources.length ? sources.map(source => `
         <div class="source-item">
             <div class="source-info">
-                <span class="source-country">${getCountryFlag(source.country)}</span>
+                <span class="source-country" title="${escapeHtml(getAnalyticsCountryName(source.country))}">${getAnalyticsCountryFlag(source.country)}</span>
                 <div class="source-details">
                     <span class="source-ip">${source.ip}</span>
                     <span class="source-count">Last seen ${timeAgo(source.lastSeen)}</span>
@@ -442,17 +927,29 @@ function showGeoMap() {
     const container = document.getElementById('world-map');
     if (!container) return;
     
-    const countries = countBy(getAnalyticsLogs(), log => log.country);
+    const countryGroups = getAnalyticsLogs().reduce((acc, log) => {
+        const key = normalizeAnalyticsCountryKey(log.country);
+        if (!acc[key]) {
+            acc[key] = {
+                key,
+                country: getAnalyticsCountryName(log.country),
+                count: 0
+            };
+        }
+        acc[key].count += 1;
+        return acc;
+    }, {});
     const positions = {
-        USA: [30, 25], China: [35, 75], Russia: [25, 65], Germany: [40, 48],
-        India: [45, 70], Brazil: [55, 30], Japan: [40, 85], UK: [36, 46], France: [42, 47]
+        US: [30, 25], CN: [35, 75], RU: [25, 65], DE: [40, 48],
+        IN: [45, 70], BR: [55, 30], JP: [40, 85], UK: [36, 46], FR: [42, 47], KR: [39, 82]
     };
+    const countries = Object.values(countryGroups).sort((a, b) => b.count - a.count);
     container.innerHTML = `
         <div class="world-map-visualization">
-            ${Object.entries(countries).map(([country, count]) => {
-                const [top, left] = positions[country] || [50, 50];
-                return `<div class="map-point" style="top: ${top}%; left: ${left}%; background: ${count > 5 ? '#dc3545' : count > 2 ? '#fd7e14' : '#28a745'};" data-country="${escapeHtml(country)}">
-                    <div class="map-tooltip">${escapeHtml(country)}: ${count} attacks</div>
+            ${countries.map((item, index) => {
+                const [top, left] = positions[item.key] || [45 + (index % 4) * 8, 40 + (index % 5) * 7];
+                return `<div class="map-point" style="top: ${top}%; left: ${left}%; background: ${item.count > 50 ? '#dc3545' : item.count > 25 ? '#fd7e14' : item.count > 5 ? '#ffc107' : '#28a745'};" data-country="${escapeHtml(item.country)}">
+                    <div class="map-tooltip">${escapeHtml(item.country)}: ${item.count} attacks</div>
                 </div>`;
             }).join('') || formatEmptyState('No geo data yet.')}
         </div>
@@ -703,6 +1200,11 @@ function renderAIInsightsError(message) {
 
 // Generate AI Insights
 async function generateAIInsights() {
+    if (!analyticsLogsReady) {
+        await hydrateAnalyticsLogs();
+        renderAnalyticsWidgets();
+    }
+
     renderAIInsightsLoading();
     showNotification('Generating AI SOC report...', 'info');
 
@@ -748,39 +1250,22 @@ async function generateAIInsights() {
 }
 
 // Update Analytics
-function updateAnalytics() {
-    if (!isAdminUser()) {
-        showNotification('Analytics is view-only for analysts.', 'warning');
-        return;
-    }
-    loadAnalyticsData();
-    if (attackDistributionChart instanceof Chart) {
-        attackDistributionChart.data = analyticsData.attackDistribution;
-        attackDistributionChart.update();
-        createAttackDistributionLegend();
-    }
-    if (window.threatTimelineChart instanceof Chart) {
-        window.threatTimelineChart.data = analyticsData.threatTimeline;
-        window.threatTimelineChart.update();
-    }
-    loadPatterns();
-    loadTopSources();
-    loadAnomalies();
-    loadRemediations();
-    loadPredictions();
-    updateAnalyticsStats();
-    showNotification('Analytics recalculated from stored logs', 'success');
+async function updateAnalytics() {
+    await hydrateAnalyticsLogs();
+    renderAnalyticsWidgets({ notify: true });
 }
 
 // Run Pattern Analysis
 function runPatternAnalysis() {
     if (!isAdminUser()) {
-        showNotification('Pattern analysis is available for admins only.', 'warning');
+        showNotification('Analysis refresh is available for admins only.', 'warning');
         return;
     }
-    loadPatterns();
+    loadClusterDetection();
     loadAnomalies();
-    showNotification('Pattern analysis recalculated from stored logs', 'success');
+    loadPredictions();
+    updateAnalyticsStats();
+    showNotification('Analytics recalculated from stored logs', 'success');
 }
 
 // Export Analytics

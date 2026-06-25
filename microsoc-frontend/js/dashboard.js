@@ -2,6 +2,7 @@
 
 let dashboardLiveSocket = null;
 let dashboardRefreshTimer = null;
+let dashboardAttackTrendsLoading = false;
 const DASHBOARD_LIVE_STREAM_STATE_KEY = 'microsocLiveStreamState';
 const DASHBOARD_LIVE_STREAM_TAB_ID_KEY = 'microsocLiveStreamTabId';
 const DASHBOARD_LOG_STORAGE_KEY = 'microsocSecurityLogs';
@@ -34,14 +35,12 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = DASHBOARD_FET
 // Initialize Dashboard
 function initDashboard() {
     removeDashboardStreamControls();
-    removeProfileRefreshButton();
+    simplifyDashboardLayout();
     loadStats();
-    loadAttackTrends();
     loadTopAttackers();
     loadAttackMap();
     loadNotifications();
     initCharts();
-    loadUserProfile();
     checkSystemHealth();
     updateTime();
     setInterval(updateTime, 1000);
@@ -58,10 +57,20 @@ function removeDashboardStreamControls() {
     });
 }
 
-function removeProfileRefreshButton() {
-    document
-        .querySelectorAll('.card-header button[onclick="refreshProfile()"]')
-        .forEach((button) => button.remove());
+function simplifyDashboardLayout() {
+    const trendCard = document.getElementById('attackTrendsChart')?.closest('.card');
+    const realtimeCard = document.getElementById('realtime-logs')?.closest('.card');
+    if (trendCard && realtimeCard) {
+        trendCard.before(realtimeCard);
+        trendCard.remove();
+    }
+
+    if (window.attackTrendsChart?.destroy) {
+        window.attackTrendsChart.destroy();
+        window.attackTrendsChart = null;
+    }
+
+    document.querySelector('.profile-info')?.closest('.card')?.remove();
 }
 
 function loadDashboardStoredLogs() {
@@ -89,6 +98,15 @@ function getDashboardDeletedLogIds() {
 function filterDashboardDeletedLogs(logs) {
     const deletedIds = getDashboardDeletedLogIds();
     return (Array.isArray(logs) ? logs : []).filter(log => !deletedIds.has(getDashboardLogId(log)));
+}
+
+function mergeDashboardLogs(...logGroups) {
+    const merged = new Map();
+    logGroups.flat().filter(Boolean).forEach((log) => {
+        const id = getDashboardLogId(log);
+        merged.set(id, { ...(merged.get(id) || {}), ...log });
+    });
+    return filterDashboardDeletedLogs(Array.from(merged.values()));
 }
 
 async function loadDashboardLogsFromApi() {
@@ -169,7 +187,20 @@ async function loadStats() {
 function renderDashboardStats(stats) {
     const container = document.getElementById('stats-container');
     if (!container) return;
-    container.innerHTML = stats.map(stat => `
+    const blockedStat = (Array.isArray(stats) ? stats : []).find(stat => stat.title === 'Blocked Attacks');
+    const normalizedStats = (Array.isArray(stats) ? stats : []).map(stat => {
+        if (stat.title !== 'Unique Sources') return stat;
+        return {
+            ...stat,
+            icon: 'fa-ban',
+            title: 'Blocked Attacks',
+            value: blockedStat?.value ?? 0,
+            change: blockedStat?.change ?? '0 blocked',
+            changeType: blockedStat?.changeType ?? 'positive',
+            color: '#28a745'
+        };
+    });
+    container.innerHTML = normalizedStats.map(stat => `
         <div class="stat-card">
             <div class="stat-icon" style="background: ${stat.color}20; color: ${stat.color}">
                 <i class="fas ${stat.icon}"></i>
@@ -278,13 +309,49 @@ function getCountryPosition(value, index = 0) {
 }
 
 async function loadLogsForRange(timeRange = '24h', limit = 5000) {
-    const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=${limit}&timeRange=${encodeURIComponent(timeRange)}`, {
-        headers: getAuthHeaders()
-    });
+    const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=${limit}&timeRange=${encodeURIComponent(timeRange)}&_=${Date.now()}`, {
+        headers: {
+            ...getAuthHeaders(),
+            'Cache-Control': 'no-cache'
+        },
+        cache: 'no-store'
+    }, 10000);
     if (!response.ok || !payload.success) {
         throw new Error(payload.message || 'Could not load logs');
     }
-    return Array.isArray(payload.logs) ? payload.logs : [];
+    const logs = Array.isArray(payload.logs) ? [...payload.logs] : [];
+    const totalPages = Math.max(1, Number(payload.totalPages) || 1);
+
+    if (totalPages > 1) {
+        const remainingPages = Array.from({ length: totalPages - 1 }, (_, index) => index + 2);
+        const pageResponses = await Promise.all(remainingPages.map(async (page) => {
+            const pageResult = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=${limit}&page=${page}&timeRange=${encodeURIComponent(timeRange)}&_=${Date.now()}`, {
+                headers: {
+                    ...getAuthHeaders(),
+                    'Cache-Control': 'no-cache'
+                },
+                cache: 'no-store'
+            }, 10000);
+            if (!pageResult.response.ok || !pageResult.payload.success) {
+                return [];
+            }
+            return Array.isArray(pageResult.payload.logs) ? pageResult.payload.logs : [];
+        }));
+        pageResponses.forEach(pageLogs => logs.push(...pageLogs));
+    }
+
+    return filterDashboardDeletedLogs(logs);
+}
+
+async function loadLogsForTrends() {
+    const storedLogs = loadDashboardStoredLogs();
+    try {
+        const apiLogs = await loadLogsForRange('all', 5000);
+        return mergeDashboardLogs(apiLogs, storedLogs);
+    } catch (error) {
+        console.error('Attack trends log sync failed, using stored logs:', error);
+        return storedLogs;
+    }
 }
 
 function buildTrendSeriesFromLogs(logs, timeRange = '7d') {
@@ -293,13 +360,23 @@ function buildTrendSeriesFromLogs(logs, timeRange = '7d') {
         '7d': 7 * 24 * 60 * 60 * 1000,
         '30d': 30 * 24 * 60 * 60 * 1000
     };
-    const now = Date.now();
-    const since = now - (windows[timeRange] || windows['7d']);
-    const buckets = new Map();
+    const normalizedLogs = (Array.isArray(logs) ? logs : [])
+        .map(log => ({
+            ...log,
+            trendTimestamp: new Date(log.timestamp || log.createdAt).getTime()
+        }))
+        .filter(log => Number.isFinite(log.trendTimestamp));
 
-    logs.forEach((log) => {
-        const timestamp = new Date(log.timestamp || log.createdAt).getTime();
-        if (!Number.isFinite(timestamp) || timestamp < since) return;
+    if (!normalizedLogs.length) return [];
+
+    const latestLogTime = Math.max(...normalizedLogs.map(log => log.trendTimestamp));
+    const since = latestLogTime - (windows[timeRange] || windows['7d']);
+    const buckets = new Map();
+    const logsInWindow = normalizedLogs.filter(log => log.trendTimestamp >= since);
+    const sourceLogs = logsInWindow.length ? logsInWindow : normalizedLogs;
+
+    sourceLogs.forEach((log) => {
+        const timestamp = log.trendTimestamp;
 
         const date = new Date(timestamp);
         const bucketKey = timeRange === '24h'
@@ -314,13 +391,15 @@ function buildTrendSeriesFromLogs(logs, timeRange = '7d') {
             timestamp,
             critical: 0,
             high: 0,
-            medium: 0
+            medium: 0,
+            lowInfo: 0
         };
 
         const severity = String(log.severity || '').toLowerCase();
         if (severity === 'critical') current.critical += 1;
         else if (severity === 'high') current.high += 1;
         else if (severity === 'medium') current.medium += 1;
+        else current.lowInfo += 1;
         current.timestamp = Math.min(current.timestamp, timestamp);
         buckets.set(bucketKey, current);
     });
@@ -413,12 +492,12 @@ function buildStatsFromLogStats(logStats) {
             color: '#17a2b8'
         },
         {
-            icon: 'fa-network-wired',
-            title: 'Unique Sources',
-            value: summary.uniqueSources,
-            change: summary.uniqueSources > 0 ? `${summary.uniqueSources} active` : 'None yet',
-            changeType: summary.uniqueSources > 0 ? 'negative' : 'positive',
-            color: '#6c757d'
+            icon: 'fa-ban',
+            title: 'Blocked Attacks',
+            value: summary.blockedAttacks,
+            change: `${summary.blockedPercentage}% blocked`,
+            changeType: summary.blockedAttacks > 0 ? 'positive' : 'negative',
+            color: '#28a745'
         }
     ];
 }
@@ -437,7 +516,7 @@ function loadLocalStats() {
         { icon: 'fa-skull-crossbones', title: 'Critical Threats', value: '0', change: 'Waiting', changeType: 'positive', color: '#fd7e14' },
         { icon: 'fa-clock', title: 'Avg Response Time', value: 'N/A', change: 'Waiting', changeType: 'positive', color: '#28a745' },
         { icon: 'fa-shield-alt', title: 'Attack Prevention', value: '0%', change: 'Waiting', changeType: 'positive', color: '#17a2b8' },
-        { icon: 'fa-network-wired', title: 'Unique Sources', value: '0', change: 'Waiting', changeType: 'positive', color: '#6c757d' }
+        { icon: 'fa-ban', title: 'Blocked Attacks', value: '0', change: 'Waiting', changeType: 'positive', color: '#28a745' }
     ]);
 }
 
@@ -516,12 +595,12 @@ function buildStatsFromStoredLogs(summary) {
             color: '#17a2b8'
         },
         {
-            icon: 'fa-network-wired',
-            title: 'Unique Sources',
-            value: summary.uniqueSources,
-            change: summary.uniqueSources > 0 ? `${summary.uniqueSources} active` : 'None yet',
-            changeType: summary.uniqueSources > 0 ? 'negative' : 'positive',
-            color: '#6c757d'
+            icon: 'fa-ban',
+            title: 'Blocked Attacks',
+            value: summary.blockedAttacks,
+            change: `${summary.blockedPercentage}% blocked`,
+            changeType: summary.blockedAttacks > 0 ? 'positive' : 'negative',
+            color: '#28a745'
         }
     ];
 }
@@ -530,77 +609,93 @@ function buildStatsFromStoredLogs(summary) {
 async function loadAttackTrends() {
     const ctx = document.getElementById('attackTrendsChart');
     if (!ctx) return;
+    if (dashboardAttackTrendsLoading) return;
+    dashboardAttackTrendsLoading = true;
 
-    const timeRange = document.getElementById('time-range')?.value || '7d';
-    let trendSeries = [];
     try {
-        const logs = await loadLogsForRange(timeRange, 5000);
-        trendSeries = buildTrendSeriesFromLogs(logs, timeRange);
-    } catch (error) {
-        console.error('Attack trends failed:', error);
-    }
+        const timeRange = document.getElementById('time-range')?.value || '7d';
+        let trendSeries = [];
+        try {
+            const logs = await loadLogsForTrends();
+            trendSeries = buildTrendSeriesFromLogs(logs, timeRange);
+        } catch (error) {
+            console.error('Attack trends failed:', error);
+        }
 
-    if (window.attackTrendsChart?.destroy) {
-        window.attackTrendsChart.destroy();
-    }
+        if (window.attackTrendsChart?.destroy) {
+            window.attackTrendsChart.destroy();
+        }
 
-    const labels = trendSeries.map(item => item.label);
-    const chartData = {
-        labels,
-        datasets: [
-            {
-                label: 'Critical',
-                data: trendSeries.map(item => item.critical),
-                borderColor: '#dc3545',
-                backgroundColor: 'rgba(220, 53, 69, 0.1)',
-                tension: 0.4
-            },
-            {
-                label: 'High',
-                data: trendSeries.map(item => item.high),
-                borderColor: '#fd7e14',
-                backgroundColor: 'rgba(253, 126, 20, 0.1)',
-                tension: 0.4
-            },
-            {
-                label: 'Medium',
-                data: trendSeries.map(item => item.medium),
-                borderColor: '#ffc107',
-                backgroundColor: 'rgba(255, 193, 7, 0.1)',
-                tension: 0.4
-            }
-        ]
-    };
-
-    window.attackTrendsChart = new Chart(ctx, {
-        type: 'line',
-        data: chartData,
-        options: {
-            responsive: true,
-            plugins: {
-                legend: {
-                    position: 'top',
+        const labels = trendSeries.map(item => item.label);
+        const chartData = {
+            labels,
+            datasets: [
+                {
+                    label: 'Critical',
+                    data: trendSeries.map(item => item.critical),
+                    borderColor: '#dc3545',
+                    backgroundColor: 'rgba(220, 53, 69, 0.1)',
+                    tension: 0.4
+                },
+                {
+                    label: 'High',
+                    data: trendSeries.map(item => item.high),
+                    borderColor: '#fd7e14',
+                    backgroundColor: 'rgba(253, 126, 20, 0.1)',
+                    tension: 0.4
+                },
+                {
+                    label: 'Medium',
+                    data: trendSeries.map(item => item.medium),
+                    borderColor: '#ffc107',
+                    backgroundColor: 'rgba(255, 193, 7, 0.1)',
+                    tension: 0.4
+                },
+                {
+                    label: 'Low / Info',
+                    data: trendSeries.map(item => item.lowInfo),
+                    borderColor: '#17a2b8',
+                    backgroundColor: 'rgba(23, 162, 184, 0.1)',
+                    tension: 0.4
                 }
-            },
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    grid: {
-                        color: 'rgba(0, 0, 0, 0.1)'
+            ]
+        };
+
+        window.attackTrendsChart = new Chart(ctx, {
+            type: 'line',
+            data: chartData,
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: {
+                        position: 'top',
                     }
                 },
-                x: {
-                    grid: {
-                        display: false
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: {
+                            color: 'rgba(0, 0, 0, 0.1)'
+                        }
+                    },
+                    x: {
+                        grid: {
+                            display: false
+                        }
                     }
                 }
             }
-        }
-    });
+        });
 
-    const loading = document.getElementById('chart-loading');
-    if (loading) {
-        loading.style.display = 'none';
+        const loading = document.getElementById('chart-loading');
+        if (loading) {
+            loading.style.display = trendSeries.length ? 'none' : 'block';
+            loading.innerHTML = trendSeries.length
+                ? ''
+                : '<i class="fas fa-info-circle"></i> No attack trend data found in stored logs yet.';
+        }
+    } finally {
+        dashboardAttackTrendsLoading = false;
     }
 }
 

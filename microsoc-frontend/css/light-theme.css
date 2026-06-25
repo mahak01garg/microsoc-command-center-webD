@@ -223,14 +223,14 @@ select[multiple] option {
 }
 
 select[multiple] option:checked {
-    background-color: var(--primary-color);
-    color: var(--text-inverse);
+    background-color: rgba(14, 116, 144, 0.16);
+    color: #0f4f5f;
     font-weight: 600;
 }
 
 select[multiple] option:hover {
-    background-color: var(--primary-hover) !important;
-    color: var(--text-inverse) !important;
+    background-color: rgba(14, 116, 144, 0.10) !important;
+    color: #0f4f5f !important;
 }
 
 /* Buttons */

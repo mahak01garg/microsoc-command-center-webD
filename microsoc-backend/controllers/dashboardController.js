@@ -159,12 +159,12 @@ const securityScore = Math.max(
         color: '#17a2b8'
       },
       {
-        icon: 'fa-network-wired',
-        title: 'Unique Sources',
-        value: uniqueSources24h,
-        change: '+3',
-        changeType: 'negative',
-        color: '#6c757d'
+        icon: 'fa-ban',
+        title: 'Blocked Attacks',
+        value: blockedAttacks24h,
+        change: `${blockedPercentage}% blocked`,
+        changeType: blockedAttacks24h > 0 ? 'positive' : 'negative',
+        color: '#28a745'
       }
     ];
 

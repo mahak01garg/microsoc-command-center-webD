@@ -790,6 +790,120 @@ kbd,
     border-bottom-color: rgba(6, 182, 212, 0.22);
 }
 
+.sidebar-header > .sidebar-toggle {
+    display: none !important;
+}
+
+.sidebar-collapse-toggle {
+    width: 34px;
+    height: 34px;
+    display: inline-grid;
+    place-items: center;
+    border: 1px solid rgba(6, 182, 212, 0.28);
+    border-radius: 10px;
+    background: rgba(6, 182, 212, 0.08);
+    color: var(--soc-cyan);
+    cursor: pointer;
+    transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.sidebar-collapse-toggle:hover {
+    transform: translateY(-1px);
+    border-color: rgba(6, 182, 212, 0.52);
+    background: rgba(6, 182, 212, 0.14);
+}
+
+body.sidebar-collapsed .sidebar {
+    width: 86px;
+    padding: 18px 12px;
+}
+
+body.sidebar-collapsed .main-content {
+    margin-left: 86px;
+}
+
+body.sidebar-collapsed .sidebar::before,
+body.sidebar-collapsed .logo h1,
+body.sidebar-collapsed .logo h2,
+body.sidebar-collapsed .user-details,
+body.sidebar-collapsed .sidebar-nav span:not(.badge) {
+    display: none !important;
+}
+
+body.sidebar-collapsed .sidebar-header {
+    justify-content: center;
+    gap: 0;
+}
+
+body.sidebar-collapsed .logo {
+    display: none;
+}
+
+body.sidebar-collapsed .sidebar-collapse-toggle {
+    margin: 0 auto;
+}
+
+body.sidebar-collapsed .user-info {
+    justify-content: center;
+    padding: 10px;
+}
+
+body.sidebar-collapsed .sidebar-nav a {
+    justify-content: center;
+    padding: 12px 10px;
+    position: relative;
+}
+
+body.sidebar-collapsed .sidebar-nav i {
+    margin-right: 0;
+}
+
+body.sidebar-collapsed .sidebar-nav .badge {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    margin-left: 0;
+    min-width: 18px;
+    height: 18px;
+    padding: 2px 5px;
+    font-size: 10px;
+}
+
+@media (max-width: 768px) {
+    body.sidebar-collapsed .sidebar {
+        width: 250px;
+        padding: 20px;
+    }
+
+    body.sidebar-collapsed .main-content {
+        margin-left: 0;
+    }
+
+    body.sidebar-collapsed .sidebar::before,
+    body.sidebar-collapsed .logo h1,
+    body.sidebar-collapsed .logo h2,
+    body.sidebar-collapsed .user-details,
+    body.sidebar-collapsed .sidebar-nav span:not(.badge) {
+        display: initial !important;
+    }
+
+    body.sidebar-collapsed .logo {
+        display: flex;
+    }
+
+    body.sidebar-collapsed .sidebar-header {
+        justify-content: space-between;
+    }
+
+    body.sidebar-collapsed .sidebar-nav a {
+        justify-content: flex-start;
+    }
+
+    body.sidebar-collapsed .sidebar-nav i {
+        margin-right: 10px;
+    }
+}
+
 .logo i,
 .header-left h1 i,
 .card-header h3 i {
@@ -2398,6 +2512,14 @@ body[data-theme="light"] .login-footer .warning {
     min-height: 260px;
 }
 
+.analytics-insights-card {
+    grid-column: 1 / -1;
+}
+
+.analytics-insights-card .insights-container {
+    max-height: 300px;
+}
+
 .ai-loading-orb {
     width: 76px;
     height: 76px;
@@ -3992,7 +4114,7 @@ html[data-theme="light"] .intel-result {
 }
 
 .settings-page .settings-card-status {
-    grid-column: 1 / -1;
+    grid-column: auto;
 }
 
 .settings-page .settings-hero {
@@ -4090,7 +4212,7 @@ html[data-theme="light"] .intel-result {
 
 .settings-page .settings-status-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: 1fr;
     gap: 12px;
 }
 
@@ -4514,7 +4636,11 @@ html[data-theme="light"].audit-logs-page .feature-audit-logs-console .feature-pa
 body[data-theme="light"].settings-page .main-header .header-left h1,
 html[data-theme="light"].settings-page .main-header .header-left h1,
 body[data-theme="light"].settings-page .main-header .header-left h1 i,
-html[data-theme="light"].settings-page .main-header .header-left h1 i {
+html[data-theme="light"].settings-page .main-header .header-left h1 i,
+body[data-theme="light"] .main-content:has(.feature-settings-console) .main-header .header-left h1,
+html[data-theme="light"] .main-content:has(.feature-settings-console) .main-header .header-left h1,
+body[data-theme="light"] .main-content:has(.feature-settings-console) .main-header .header-left h1 i,
+html[data-theme="light"] .main-content:has(.feature-settings-console) .main-header .header-left h1 i {
     color: #0f172a !important;
     opacity: 1 !important;
     -webkit-text-fill-color: #0f172a !important;
@@ -4522,7 +4648,9 @@ html[data-theme="light"].settings-page .main-header .header-left h1 i {
 }
 
 body[data-theme="light"].settings-page .main-header .subtitle,
-html[data-theme="light"].settings-page .main-header .subtitle {
+html[data-theme="light"].settings-page .main-header .subtitle,
+body[data-theme="light"] .main-content:has(.feature-settings-console) .main-header .subtitle,
+html[data-theme="light"] .main-content:has(.feature-settings-console) .main-header .subtitle {
     color: #164e63 !important;
     opacity: 1 !important;
 }

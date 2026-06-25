@@ -34,8 +34,7 @@ const FAILED_LOGIN_PATTERN = /failed login|invalid password|authentication faile
 const DEFAULT_PIPELINE_SETTINGS = {
   alertConfig: {
     failedLoginThreshold: 5,
-    portScanThreshold: 10,
-    ddosThreshold: 1000
+    otherAlertsThreshold: 1
   },
   incidentConfig: {
     createIncidentAfter: 3,
@@ -194,6 +193,8 @@ function incidentTitleForAlert(alert) {
 function incidentCategoryForAlert(alert) {
   if (alert.ruleId === 'sql_injection' || alert.ruleId === 'xss_attack') return 'vulnerability';
   if (alert.ruleId === 'brute_force') return 'vulnerability';
+  if (alert.ruleId === 'malware_detected' || alert.ruleId === 'ransomware_detected') return 'malware';
+  if (alert.ruleId === 'phishing_detected') return 'phishing';
   if (alert.ruleId === 'data_exfiltration') return 'data_breach';
   if (alert.ruleId === 'port_scan' || alert.ruleId === 'anomaly_spike') return 'other';
   if (alert.ruleId === 'multi_stage_attack') return 'insider_threat';
@@ -231,21 +232,107 @@ async function getPipelineSettings() {
   }
 }
 
+function otherAttackRule(attackType) {
+  const rules = {
+    'SQL Injection': {
+      severity: 'critical',
+      mitreTechnique: 'T1190',
+      confidence: 97,
+      riskScore: 96,
+      recommendedAction: 'Block the source IP, inspect the vulnerable endpoint, and review database error logs.'
+    },
+    XSS: {
+      name: 'XSS Attack',
+      severity: 'critical',
+      mitreTechnique: 'T1190',
+      confidence: 96,
+      riskScore: 95,
+      recommendedAction: 'Sanitize inputs, review the affected route, and enforce strict output encoding.'
+    },
+    'Port Scan': {
+      severity: 'medium',
+      mitreTechnique: 'T1046',
+      confidence: 88,
+      riskScore: 55,
+      recommendedAction: 'Block the scanner source IP and review exposed services.'
+    },
+    DDoS: {
+      name: 'DDoS / Traffic Spike',
+      severity: 'high',
+      mitreTechnique: 'T1498',
+      confidence: 86,
+      riskScore: 82,
+      recommendedAction: 'Rate-limit noisy origins, validate service health, and review upstream protection.'
+    },
+    Malware: {
+      severity: 'critical',
+      mitreTechnique: 'T1204',
+      confidence: 94,
+      riskScore: 91,
+      recommendedAction: 'Isolate the host, collect malware indicators, and run endpoint containment.'
+    },
+    Phishing: {
+      severity: 'high',
+      mitreTechnique: 'T1566',
+      confidence: 90,
+      riskScore: 80,
+      recommendedAction: 'Quarantine the message/source, review clicked users, and reset exposed credentials.'
+    },
+    Ransomware: {
+      severity: 'critical',
+      mitreTechnique: 'T1486',
+      confidence: 96,
+      riskScore: 98,
+      recommendedAction: 'Disconnect affected systems, preserve evidence, and begin ransomware containment.'
+    },
+    'Credential Theft': {
+      severity: 'high',
+      mitreTechnique: 'T1003',
+      confidence: 90,
+      riskScore: 86,
+      recommendedAction: 'Invalidate sessions, rotate credentials, and review identity provider logs.'
+    },
+    'Data Exfiltration': {
+      severity: 'high',
+      mitreTechnique: 'T1030',
+      confidence: 90,
+      riskScore: 82,
+      recommendedAction: 'Pause outbound transfers, isolate the system, and validate data-loss boundaries.'
+    }
+  };
+  const base = rules[attackType] || {
+    severity: 'medium',
+    mitreTechnique: 'T1040',
+    confidence: 82,
+    riskScore: 60,
+    recommendedAction: 'Review the related logs, validate impact, and contain repeated suspicious sources.'
+  };
+
+  return {
+    id: `${attackType.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'other'}_alert`,
+    name: base.name || attackType,
+    ...base
+  };
+}
+
 async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
   const alertConfig = {
     ...DEFAULT_PIPELINE_SETTINGS.alertConfig,
     ...(settings.alertConfig || {})
   };
   const failedLoginThreshold = Math.max(1, Number(alertConfig.failedLoginThreshold) || DEFAULT_PIPELINE_SETTINGS.alertConfig.failedLoginThreshold);
-  const portScanThreshold = Math.max(1, Number(alertConfig.portScanThreshold) || DEFAULT_PIPELINE_SETTINGS.alertConfig.portScanThreshold);
-  const ddosThreshold = Math.max(10, Number(alertConfig.ddosThreshold) || DEFAULT_PIPELINE_SETTINGS.alertConfig.ddosThreshold);
+  const otherAlertsThreshold = Math.max(1, Number(alertConfig.otherAlertsThreshold) || DEFAULT_PIPELINE_SETTINGS.alertConfig.otherAlertsThreshold);
 
   const recent5m = await getRecentLogsForSource(log.sourceIP, 5);
   const recent10m = await getRecentLogsForSource(log.sourceIP, 10);
-  const recent15m = await getRecentLogsForSource(log.sourceIP, 15);
 
   const detections = [];
   const currentText = `${log.attackType} ${log.description} ${log.userAgent || ''}`;
+  const effectiveAttackType = SQLI_PATTERN.test(currentText)
+    ? 'SQL Injection'
+    : XSS_PATTERN.test(currentText)
+      ? 'XSS'
+      : log.attackType;
 
   const failedLoginCount = recent5m.filter(item => {
     const text = `${item.attackType} ${item.description || ''} ${item.userAgent || ''}`;
@@ -284,213 +371,51 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
     });
   }
 
-  const recentPorts = new Set(
-    recent10m
-      .map(item => Number(item.port))
-      .filter(port => Number.isInteger(port) && port > 0)
-  );
-  const recentPortScanCount = recent10m.filter(item => item.attackType === 'Port Scan').length;
-  if (recentPorts.size >= portScanThreshold || recentPortScanCount >= portScanThreshold) {
-    detections.push({
-      id: 'port_scan',
-      name: 'Port Scan',
-      severity: 'medium',
-      mitreTechnique: 'T1046',
-      confidence: 88,
-      windowMinutes: 10,
-      riskScore: 55,
-      recommendedAction: 'Block the scanner source IP and review exposed services.',
-      alert: makeAlert(
-        {
-          id: 'port_scan',
-          name: 'Port Scan',
-          severity: 'medium',
-          mitreTechnique: 'T1046',
-          recommendedAction: 'Block the scanner source IP and review exposed services.'
-        },
-        log,
-        {
-          title: 'Port scanning observed',
-          message: `${recentPorts.size} unique ports were probed from ${log.sourceIP} within 10 minutes.`,
-          evidence: {
-            threshold: portScanThreshold,
-            uniquePorts: recentPorts.size,
-            scanEvents: recentPortScanCount,
-            relatedLogs: recent10m.slice(0, 10).map(item => item._id)
-          }
-        }
-      )
+  if (effectiveAttackType !== 'Brute Force') {
+    const relatedOtherLogs = recent10m.filter(item => {
+      const text = `${item.attackType} ${item.description || ''} ${item.userAgent || ''}`;
+      const itemAttackType = SQLI_PATTERN.test(text)
+        ? 'SQL Injection'
+        : XSS_PATTERN.test(text)
+          ? 'XSS'
+          : item.attackType;
+      return itemAttackType === effectiveAttackType;
     });
-  }
+    const otherAlertCount = relatedOtherLogs.length;
 
-  if (SQLI_PATTERN.test(currentText) || log.attackType === 'SQL Injection') {
-    detections.push({
-      id: 'sql_injection',
-      name: 'SQL Injection',
-      severity: 'critical',
-      mitreTechnique: 'T1190',
-      confidence: 97,
-      windowMinutes: 0,
-      riskScore: 96,
-      recommendedAction: 'Block the source IP, inspect the vulnerable endpoint, and review database error logs.',
-      alert: makeAlert(
-        {
-          id: 'sql_injection',
-          name: 'SQL Injection',
-          severity: 'critical',
-          mitreTechnique: 'T1190',
-          recommendedAction: 'Block the source IP, inspect the vulnerable endpoint, and review database error logs.'
-        },
-        log,
-        {
-          title: 'SQL injection payload detected',
-          message: `Suspicious SQL injection content matched on ${log.targetSystem}.`,
-          evidence: {
-            sample: log.description,
-            relatedLogs: recent10m.slice(0, 5).map(item => item._id)
+    if (otherAlertCount >= otherAlertsThreshold) {
+      const otherRule = otherAttackRule(effectiveAttackType);
+      detections.push({
+        id: otherRule.id,
+        name: otherRule.name,
+        severity: otherRule.severity,
+        mitreTechnique: otherRule.mitreTechnique,
+        confidence: otherRule.confidence,
+        windowMinutes: 10,
+        riskScore: otherRule.riskScore,
+        recommendedAction: otherRule.recommendedAction,
+        alert: makeAlert(
+          {
+            id: otherRule.id,
+            name: otherRule.name,
+            severity: otherRule.severity,
+            mitreTechnique: otherRule.mitreTechnique,
+            recommendedAction: otherRule.recommendedAction
+          },
+          { ...log, attackType: effectiveAttackType },
+          {
+            title: `${otherRule.name} detected`,
+            message: `${otherAlertCount} ${effectiveAttackType} log${otherAlertCount === 1 ? '' : 's'} detected from ${log.sourceIP} within 10 minutes.`,
+            evidence: {
+              threshold: otherAlertsThreshold,
+              recentAttempts: otherAlertCount,
+              sample: log.description,
+              relatedLogs: relatedOtherLogs.slice(0, 10).map(item => item._id)
+            }
           }
-        }
-      )
-    });
-  }
-
-  if (XSS_PATTERN.test(currentText) || log.attackType === 'XSS') {
-    detections.push({
-      id: 'xss_attack',
-      name: 'XSS Attack',
-      severity: 'critical',
-      mitreTechnique: 'T1190',
-      confidence: 96,
-      windowMinutes: 0,
-      riskScore: 95,
-      recommendedAction: 'Sanitize inputs, review the affected route, and enforce strict output encoding.',
-      alert: makeAlert(
-        {
-          id: 'xss_attack',
-          name: 'XSS Attack',
-          severity: 'critical',
-          mitreTechnique: 'T1190',
-          recommendedAction: 'Sanitize inputs, review the affected route, and enforce strict output encoding.'
-        },
-        log,
-        {
-          title: 'XSS payload detected',
-          message: `Script injection patterns matched against ${log.targetSystem}.`,
-          evidence: {
-            sample: log.description,
-            relatedLogs: recent10m.slice(0, 5).map(item => item._id)
-          }
-        }
-      )
-    });
-  }
-
-  const requestSize = Number(log?.metadata?.requestSize || log?.metadata?.downloadSize || 0);
-  if (log.attackType === 'Data Exfiltration' || requestSize > 500 * 1024 * 1024) {
-    detections.push({
-      id: 'data_exfiltration',
-      name: 'Data Exfiltration',
-      severity: 'high',
-      mitreTechnique: 'T1030',
-      confidence: 90,
-      windowMinutes: 5,
-      riskScore: 82,
-      recommendedAction: 'Pause outbound transfers, isolate the system, and validate data-loss boundaries.',
-      alert: makeAlert(
-        {
-          id: 'data_exfiltration',
-          name: 'Data Exfiltration',
-          severity: 'high',
-          mitreTechnique: 'T1030',
-          recommendedAction: 'Pause outbound transfers, isolate the system, and validate data-loss boundaries.'
-        },
-        log,
-        {
-          title: 'Possible data exfiltration',
-          message: `Large transfer or exfiltration-like activity detected from ${log.sourceIP}.`,
-          evidence: {
-            requestSize,
-            relatedLogs: recent15m.slice(0, 10).map(item => item._id)
-          }
-        }
-      )
-    });
-  }
-
-  const recent5mAll = await Log.find({
-    timestamp: { $gte: new Date(Date.now() - 5 * 60 * 1000) }
-  }).lean();
-  const previous5mAll = await Log.find({
-    timestamp: {
-      $gte: new Date(Date.now() - 10 * 60 * 1000),
-      $lt: new Date(Date.now() - 5 * 60 * 1000)
+        )
+      });
     }
-  }).lean();
-
-  if (recent5mAll.length >= ddosThreshold || recent5mAll.length >= Math.max(ddosThreshold, previous5mAll.length * 3 + 1)) {
-    detections.push({
-      id: 'anomaly_spike',
-      name: 'Traffic Spike',
-      severity: 'medium',
-      mitreTechnique: 'T1040',
-      confidence: 84,
-      windowMinutes: 5,
-      riskScore: 58,
-      recommendedAction: 'Review baseline behavior, inspect the source mix, and rate-limit noisy origins.',
-      alert: makeAlert(
-        {
-          id: 'anomaly_spike',
-          name: 'Traffic Spike',
-          severity: 'medium',
-          mitreTechnique: 'T1040',
-          recommendedAction: 'Review baseline behavior, inspect the source mix, and rate-limit noisy origins.'
-        },
-        log,
-        {
-          title: 'Traffic spike detected',
-          message: `Current traffic is ${Math.round((recent5mAll.length / Math.max(previous5mAll.length || 1, 1)) * 100)}% of the previous window baseline.`,
-          evidence: {
-            threshold: ddosThreshold,
-            currentWindow: recent5mAll.length,
-            previousWindow: previous5mAll.length
-          }
-        }
-      )
-    });
-  }
-
-  const distinctAttackTypes = new Set(recent15m.map(item => item.attackType).filter(Boolean));
-  const chainPattern = ['Port Scan', 'Brute Force', 'SQL Injection', 'XSS', 'Data Exfiltration'];
-  const chainMatched = chainPattern.filter(type => recent15m.some(item => item.attackType === type)).length >= 3;
-  if (distinctAttackTypes.size >= 3 || chainMatched) {
-    detections.push({
-      id: 'multi_stage_attack',
-      name: 'Multi-Stage Attack',
-      severity: 'critical',
-      mitreTechnique: 'T1566',
-      confidence: 94,
-      windowMinutes: 15,
-      riskScore: 93,
-      recommendedAction: 'Correlate the chain, isolate the target, and open an incident for triage.',
-      alert: makeAlert(
-        {
-          id: 'multi_stage_attack',
-          name: 'Multi-Stage Attack',
-          severity: 'critical',
-          mitreTechnique: 'T1566',
-          recommendedAction: 'Correlate the chain, isolate the target, and open an incident for triage.'
-        },
-        log,
-        {
-          title: 'Multi-stage attack chain detected',
-          message: `${distinctAttackTypes.size} attack families appeared from ${log.sourceIP} in 15 minutes.`,
-          evidence: {
-            attackTypes: Array.from(distinctAttackTypes),
-            relatedLogs: recent15m.slice(0, 15).map(item => item._id)
-          }
-        }
-      )
-    });
   }
 
   return detections;

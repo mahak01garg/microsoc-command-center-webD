@@ -16,7 +16,9 @@ let itemsPerPage = 25;
 let totalPages = 1;
 const LOG_STORAGE_KEY = 'microsocSecurityLogs';
 const DELETED_LOG_IDS_KEY = 'microsocDeletedLogIds';
+const ALERT_CORRELATION_CACHE_KEY = 'microsocAlertCorrelationCache';
 const MAX_STORED_LOGS = 1000;
+const MAX_ALERT_CORRELATION_CACHE = 1000;
 const LIVE_STREAM_INTERVAL_MS = 3000;
 const LIVE_STREAM_FIRST_DELAY_MS = 1200;
 const LIVE_RENDER_DEBOUNCE_MS = 250;
@@ -41,7 +43,21 @@ function canManageLogs() {
     return isAdminUser();
 }
 
+function normalizeLogPromotionButtons() {
+    document.querySelectorAll('button[onclick*="createIncidentFromSelected"]').forEach(button => {
+        button.setAttribute('onclick', 'createAlertFromSelected()');
+        button.innerHTML = '<i class="fas fa-bell"></i> Create Alert';
+        button.title = 'Create alert from selected logs';
+    });
+}
+
 function syncLogRoleUi() {
+    normalizeLogPromotionButtons();
+    document.querySelectorAll('#total-logs').forEach(element => {
+        const title = element.closest('.stat-info')?.querySelector('h3');
+        if (title) title.textContent = 'Total Logs';
+    });
+
     const headerButtonSelectors = [
         '.log-controls .btn-primary',
         '.log-controls .btn-danger',
@@ -49,13 +65,14 @@ function syncLogRoleUi() {
         '.log-controls button[onclick*="deleteSelectedLogs"]',
         '.log-controls button[onclick*="exportLogs"]',
         '.log-controls button[onclick*="exportSelectedLogs"]',
-        '.log-controls button[onclick*="createIncidentFromSelected"]'
+        '.log-controls button[onclick*="createIncidentFromSelected"]',
+        '.log-controls button[onclick*="createAlertFromSelected"]'
     ];
 
     headerButtonSelectors.forEach(selector => {
         document.querySelectorAll(selector).forEach(button => {
             const label = (button.textContent || '').toLowerCase();
-            const shouldHide = !canManageLogs() && /clear|delete|export|create incident|bulk/i.test(label);
+            const shouldHide = !canManageLogs() && /clear|delete|export|create incident|create alert|bulk/i.test(label);
             if (shouldHide) {
                 button.style.display = 'none';
             }
@@ -265,12 +282,6 @@ function syncFilteredLogs() {
     filterLogs({ skipApi: true });
 }
 
-function selectEveryFilterOption(selector) {
-    document.querySelectorAll(selector).forEach(option => {
-        option.selected = true;
-    });
-}
-
 function getSelectedFilterValues(selectId) {
     const select = document.getElementById(selectId);
     if (!select) return [];
@@ -286,6 +297,17 @@ function getSelectedFilterValues(selectId) {
     return selected;
 }
 
+function clearDefaultMultiSelectFilters() {
+    ['filter-severity', 'filter-type'].forEach((selectId) => {
+        const select = document.getElementById(selectId);
+        if (!select) return;
+        Array.from(select.options || []).forEach(option => {
+            option.selected = false;
+        });
+        select.selectedIndex = -1;
+    });
+}
+
 // Initialize Logs
 function initLogs() {
     const state = getLiveStreamState();
@@ -298,7 +320,7 @@ function initLogs() {
     
     // Setup multi-select styling
     setupMultiSelect();
-    selectEveryFilterOption('#filter-severity option, #filter-type option');
+    clearDefaultMultiSelectFilters();
     const timeFilter = document.getElementById('filter-time');
     if (timeFilter) {
         timeFilter.value = 'all';
@@ -392,6 +414,7 @@ function loadLogsForPage() {
     currentLogs = filteredLogs.slice(startIndex, endIndex);
     
     renderLogs();
+    updateLogStats();
     updatePagination();
     updateSelectedCount();
 }
@@ -469,7 +492,7 @@ function renderLogs() {
                     <button class="btn-icon ai-action-btn" onclick="explainLogWithAI('${jsLogId}')" title="AI Explain">
                         <i class="fas fa-brain"></i>
                     </button>
-                    ${canManageLogs() ? `<button class="btn-icon" onclick="createIncidentFromLog('${jsLogId}')" title="Create Incident"><i class="fas fa-exclamation-triangle"></i></button>` : ''}
+                    ${canManageLogs() ? `<button class="btn-icon" onclick="createAlertFromLog('${jsLogId}')" title="Create Alert"><i class="fas fa-bell"></i></button>` : ''}
                 </div>
             </td>
         </tr>
@@ -484,38 +507,50 @@ function renderLogs() {
 
 // Update Log Statistics
 function updateLogStats() {
-    const now = Date.now();
-    const oneDay = 24 * 60 * 60 * 1000;
-    
-    const logsToday = allLogs.filter(log => 
-        (now - new Date(log.timestamp)) < oneDay
-    ).length;
-    
-    const criticalLogs = allLogs.filter(log => 
-        log.severity === 'critical' && (now - new Date(log.timestamp)) < oneDay
-    ).length;
-    
-    const blockedAttacks = allLogs.filter(log => 
-        log.isBlocked && (now - new Date(log.timestamp)) < oneDay
-    ).length;
-    
+    const statsLogs = allLogs.length ? allLogs : (filteredLogs.length ? filteredLogs : currentLogs);
+    const totalLogs = statsLogs.length;
+    const criticalLogs = statsLogs.filter(log => String(log.severity || '').toLowerCase() === 'critical').length;
+    const blockedAttacks = statsLogs.filter(log => log.isBlocked).length;
     const uniqueSources = new Set(
-        allLogs.filter(log => (now - new Date(log.timestamp)) < oneDay)
-               .map(log => log.sourceIP)
+        statsLogs.map(log => log.sourceIP).filter(Boolean)
     ).size;
-    
-    document.getElementById('total-logs').textContent = logsToday;
-    document.getElementById('critical-logs').textContent = criticalLogs;
-    document.getElementById('blocked-attacks').textContent = blockedAttacks;
-    document.getElementById('unique-sources').textContent = uniqueSources;
-    document.getElementById('log-count').textContent = allLogs.length;
+
+    const setText = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+    };
+
+    setText('total-logs', totalLogs);
+    setText('critical-logs', criticalLogs);
+    setText('blocked-attacks', blockedAttacks);
+    setText('unique-sources', uniqueSources);
+    setText('log-count', totalLogs);
+
+    const updateCardMeta = (valueId, text, tone = 'neutral') => {
+        const valueElement = document.getElementById(valueId);
+        const meta = valueElement?.closest('.stat-info')?.querySelector('.stat-change');
+        if (!meta) return;
+        meta.classList.remove('positive', 'negative');
+        if (tone !== 'neutral') meta.classList.add(tone);
+        meta.innerHTML = text;
+    };
+
+    updateCardMeta('total-logs', '<i class="fas fa-database"></i> All-time logs', 'neutral');
+    updateCardMeta('critical-logs', `<i class="fas fa-skull-crossbones"></i> ${criticalLogs} critical`, criticalLogs > 0 ? 'negative' : 'positive');
+    updateCardMeta('blocked-attacks', `<i class="fas fa-shield-alt"></i> ${blockedAttacks} blocked`, blockedAttacks > 0 ? 'positive' : 'neutral');
+    updateCardMeta('unique-sources', `<i class="fas fa-network-wired"></i> ${uniqueSources} sources`, uniqueSources > 0 ? 'negative' : 'neutral');
 }
 
-function buildLogApiQuery() {
+function buildLogApiQuery(options = {}) {
+    const includeFilters = options.includeFilters !== false;
     const params = new URLSearchParams();
     params.set('page', '1');
     params.set('limit', '5000');
-    params.set('timeRange', document.getElementById('filter-time')?.value || 'all');
+    params.set('timeRange', includeFilters ? (document.getElementById('filter-time')?.value || 'all') : 'all');
+
+    if (!includeFilters) {
+        return params;
+    }
 
     getSelectedFilterValues('filter-severity').forEach(value => params.append('severity', value));
 
@@ -535,7 +570,7 @@ async function refreshLogsFromApi() {
     if (!token) return;
 
     try {
-        const response = await fetch(`${getApiBaseUrl()}/logs?${buildLogApiQuery().toString()}`, {
+        const response = await fetch(`${getApiBaseUrl()}/logs?${buildLogApiQuery({ includeFilters: false }).toString()}`, {
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${token}`
@@ -551,6 +586,10 @@ async function refreshLogsFromApi() {
         filterLogs({ skipApi: true });
     } catch (error) {
         console.warn('Log history sync failed:', error);
+        if (!allLogs.length) {
+            allLogs = loadStoredLogs().sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            filterLogs({ skipApi: true });
+        }
     }
 }
 
@@ -700,8 +739,6 @@ function resetFilters() {
     document.getElementById('filter-ip').value = '';
     document.getElementById('filter-time').value = 'all';
     document.getElementById('search-logs').value = '';
-    
-    selectEveryFilterOption('#filter-severity option, #filter-type option');
     
     currentPage = 1;
     filterLogs();
@@ -898,8 +935,12 @@ function flushLiveLogs() {
 
             if (convertibleLog) {
                 autoConvertedLiveLogIds.add(getLogId(convertibleLog));
-                createIncidentFromLog(getLogId(convertibleLog)).catch(error => {
-                    console.warn('Auto incident creation failed:', error);
+                createAlertFromLog(getLogId(convertibleLog), {
+                    title: 'Alert Generated from Live Attack',
+                    message: `${convertibleLog.severity.toUpperCase()} ${convertibleLog.attackType} promoted to alert`,
+                    meta: `${convertibleLog.sourceIP} | ${convertibleLog.targetSystem} | ${convertibleLog.country}`
+                }).catch(error => {
+                    console.warn('Auto alert creation failed:', error);
                     autoConvertedLiveLogIds.delete(getLogId(convertibleLog));
                 });
             }
@@ -1083,7 +1124,7 @@ function viewLogDetail(logId) {
             <div class="log-detail-section">
                 <h4>Actions</h4>
                 <div style="display: flex; flex-direction: column; gap: 10px;">
-                    ${canManageLogs() ? `<button class="btn btn-primary" onclick="createIncidentFromLog('${jsLogId}'); closeLogModal()"><i class="fas fa-exclamation-triangle"></i> Create Incident</button>` : ''}
+                    ${canManageLogs() ? `<button class="btn btn-primary" onclick="createAlertFromLog('${jsLogId}'); closeLogModal()"><i class="fas fa-bell"></i> Create Alert</button>` : ''}
                     <button class="btn btn-outline" onclick="showRemediation('${jsLogId}')">
                         <i class="fas fa-lightbulb"></i> AI Prevention
                     </button>
@@ -1377,39 +1418,298 @@ function updateIncidentCount(delta = 1) {
     }
 }
 
-// Create Incident from Log
-async function createIncidentFromLog(logId) {
+function updateAlertCount(delta = 1) {
+    const alertCount = document.getElementById('notification-count');
+    if (alertCount) {
+        let count = parseInt(alertCount.textContent) || 0;
+        count += delta;
+        alertCount.textContent = count;
+    }
+}
+
+function buildAlertFromLog(log) {
+    const logId = getLogId(log);
+    const alert = {
+        title: `Alert: ${log.attackType} from ${log.sourceIP}`,
+        description: `${log.description}\n\nSource IP: ${log.sourceIP}\nTarget: ${log.targetSystem}\nProtocol: ${log.protocol}\nPort: ${log.port}\nBlocked: ${log.isBlocked ? 'Yes' : 'No'}`,
+        severity: log.severity,
+        status: 'new',
+        sourceIP: log.sourceIP,
+        targetSystem: log.targetSystem,
+        attackType: log.attackType,
+        ruleId: 'manual_log_promotion',
+        correlationKey: `manual-log-alert:${logId}`,
+        evidence: {
+            logId,
+            timestamp: log.timestamp,
+            country: log.country,
+            protocol: log.protocol,
+            port: log.port,
+            isBlocked: log.isBlocked
+        },
+        metadata: {
+            source: 'security-log-action',
+            promotedFromLog: true
+        },
+        tags: ['from-log', 'manual-alert', String(log.attackType || 'threat').toLowerCase().replace(/\s+/g, '-')]
+    };
+
+    const backendLogId = log._id || log.id;
+    if (/^[a-f\d]{24}$/i.test(String(backendLogId || ''))) {
+        alert.log = backendLogId;
+    }
+
+    return alert;
+}
+
+async function persistAlert(alert) {
+    const token = localStorage.getItem('token') || '';
+    const response = await fetch(`${getApiBaseUrl()}/alerts`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(alert)
+    });
+
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        throw new Error(data.message || data.error || 'Alert save failed');
+    }
+
+    return data;
+}
+
+function getAlertCorrelationKey(alert) {
+    return [
+        String(alert?.ruleId || 'manual-alert').toLowerCase(),
+        String(alert?.attackType || 'other').toLowerCase()
+    ].join('|');
+}
+
+function loadAlertCorrelationCache() {
+    try {
+        const cached = JSON.parse(localStorage.getItem(ALERT_CORRELATION_CACHE_KEY) || '[]');
+        return Array.isArray(cached) ? cached : [];
+    } catch (error) {
+        return [];
+    }
+}
+
+function saveAlertCorrelationCache(alerts) {
+    localStorage.setItem(
+        ALERT_CORRELATION_CACHE_KEY,
+        JSON.stringify((Array.isArray(alerts) ? alerts : []).slice(-MAX_ALERT_CORRELATION_CACHE))
+    );
+}
+
+function rememberAlertCorrelationCandidate(alert, savedAlert = {}) {
+    const cache = loadAlertCorrelationCache();
+    const normalized = {
+        id: String(savedAlert._id || savedAlert.id || alert.correlationKey || `${Date.now()}-${Math.random()}`),
+        title: savedAlert.title || alert.title,
+        severity: savedAlert.severity || alert.severity,
+        sourceIP: savedAlert.sourceIP || alert.sourceIP,
+        targetSystem: savedAlert.targetSystem || alert.targetSystem,
+        attackType: savedAlert.attackType || alert.attackType,
+        ruleId: savedAlert.ruleId || alert.ruleId,
+        log: savedAlert.log || alert.log,
+        evidence: savedAlert.evidence || alert.evidence || {},
+        createdAt: savedAlert.createdAt || new Date().toISOString()
+    };
+    const deduped = cache.filter(item => item.id !== normalized.id);
+    deduped.push(normalized);
+    saveAlertCorrelationCache(deduped);
+    return normalized;
+}
+
+async function getIncidentThresholdSetting() {
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/settings`, {
+            headers: {
+                'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+            }
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.message || 'Settings unavailable');
+        return Math.max(1, Number(data.settings?.incidentConfig?.createIncidentAfter) || 3);
+    } catch (error) {
+        console.warn('Incident threshold fallback:', error);
+        return 3;
+    }
+}
+
+function alertsAreSimilar(alert, candidate) {
+    if (!candidate) return false;
+    if (alert.ruleId && candidate.ruleId && alert.ruleId !== candidate.ruleId) return false;
+    return String(alert.attackType || '').toLowerCase() === String(candidate.attackType || '').toLowerCase();
+}
+
+function normalizeIncidentSeverity(severity) {
+    const value = String(severity || 'medium').toLowerCase();
+    return ['critical', 'high', 'medium', 'low'].includes(value) ? value : 'medium';
+}
+
+function incidentCategoryFromAttack(attackType) {
+    const value = String(attackType || '').toLowerCase();
+    if (value.includes('malware') || value.includes('ransomware')) return 'malware';
+    if (value.includes('phishing') || value.includes('credential')) return 'phishing';
+    if (value.includes('ddos')) return 'ddos';
+    if (value.includes('insider')) return 'insider_threat';
+    if (value.includes('data') || value.includes('exfiltration')) return 'data_breach';
+    if (value.includes('scan') || value.includes('injection') || value.includes('xss')) return 'vulnerability';
+    return 'other';
+}
+
+async function createIncidentFromAlertFallback(alert, similarAlerts, threshold) {
+    const sourceIPs = [...new Set(similarAlerts.map(item => item.sourceIP).filter(Boolean))];
+    const affectedSystems = [...new Set(similarAlerts.map(item => item.targetSystem).filter(Boolean))];
+    const relatedLogs = [...new Set(similarAlerts.map(item => item.log?._id || item.log || item.evidence?.logId).filter(id => /^[a-f\d]{24}$/i.test(String(id))))];
+    const highestSeverity = similarAlerts.some(item => item.severity === 'critical')
+        ? 'critical'
+        : similarAlerts.some(item => item.severity === 'high')
+            ? 'high'
+            : normalizeIncidentSeverity(alert.severity);
+    const singleSource = sourceIPs.length === 1 ? sourceIPs[0] : undefined;
+    const incident = {
+        title: `Repeated ${alert.attackType || alert.ruleId || 'security'} alerts${singleSource ? ` from ${singleSource}` : ''}`,
+        description: [
+            `${similarAlerts.length} similar alerts reached the incident threshold (${threshold}).`,
+            '',
+            `Attack Type: ${alert.attackType || 'Unknown'}`,
+            `Rule: ${alert.ruleId || 'N/A'}`,
+            `Source IPs: ${sourceIPs.join(', ') || 'Unknown'}`
+        ].join('\n'),
+        severity: highestSeverity,
+        status: 'open',
+        category: incidentCategoryFromAttack(alert.attackType),
+        sourceIP: singleSource,
+        affectedSystems,
+        relatedLogs,
+        impact: highestSeverity,
+        priority: highestSeverity,
+        tags: ['auto-alert-correlation', 'frontend-fallback', String(alert.attackType || 'alert').toLowerCase().replace(/\s+/g, '-')]
+    };
+
+    const response = await fetch(`${getApiBaseUrl()}/incidents`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+        },
+        body: JSON.stringify(incident)
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        throw new Error(data.message || 'Incident fallback creation failed');
+    }
+    return data.incident;
+}
+
+async function ensureIncidentForSimilarAlerts(alert, result = {}) {
+    if (result.incident || result.incidentCreated) return result;
+
+    const threshold = await getIncidentThresholdSetting();
+    const localCandidate = rememberAlertCorrelationCandidate(alert, result.alert || {});
+    let backendAlerts = [];
+
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/alerts/recent?limit=500&timeRange=all`, {
+            headers: {
+                'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
+                'Cache-Control': 'no-cache'
+            },
+            cache: 'no-store'
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            backendAlerts = data.alerts || [];
+        }
+    } catch (error) {
+        console.warn('Backend alert correlation lookup failed, using local alert cache:', error);
+    }
+
+    const combinedAlerts = [...backendAlerts, ...loadAlertCorrelationCache(), localCandidate];
+    const uniqueAlerts = Array.from(new Map(combinedAlerts.map(item => [
+        String(item._id || item.id || item.correlationKey || `${item.createdAt}-${item.sourceIP}-${item.attackType}`),
+        item
+    ])).values());
+    const similarAlerts = uniqueAlerts.filter(candidate => alertsAreSimilar(alert, candidate));
+
+    if (similarAlerts.length < threshold) return result;
+
+    const incident = await createIncidentFromAlertFallback(alert, similarAlerts, threshold);
+    return {
+        ...result,
+        incident,
+        incidentCreated: true,
+        similarAlertCount: similarAlerts.length,
+        incidentThreshold: threshold
+    };
+}
+
+// Create Alert from Log
+async function createAlertFromLog(logId, options = {}) {
     if (!canManageLogs()) {
-        showNotification('Only admins can create incidents from logs.', 'warning');
+        showNotification('Only admins can create alerts from logs.', 'warning');
         return;
     }
     const log = allLogs.find(l => getLogId(l) === String(logId));
     if (!log) return;
 
-    const incident = buildIncidentFromLog(log);
+    const alert = buildAlertFromLog(log);
 
     try {
-        const savedIncident = await persistIncident(incident);
-        updateIncidentCount(1);
-        showNotification(`Incident ${savedIncident._id || savedIncident.id || ''} added to Incidents tab`, 'success', {
-            title: 'Incident Created',
-            meta: `${log.attackType} | ${log.sourceIP}`
-        });
+        let result = await persistAlert(alert);
+        try {
+            result = await ensureIncidentForSimilarAlerts(alert, result);
+        } catch (correlationError) {
+            console.warn('Alert-to-incident correlation failed:', correlationError);
+        }
+        const savedAlert = result.alert;
+        updateAlertCount(1);
+        if (result.incident) {
+            updateIncidentCount(result.incidentCreated ? 1 : 0);
+        }
+        if (!options.silent) {
+            showNotification(options.message || `Alert ${savedAlert._id || savedAlert.id || ''} added to Alerts tab`, 'success', {
+                title: options.title || 'Alert Created',
+                meta: options.meta || `${log.attackType} | ${log.sourceIP}`
+            });
+            if (result.incident) {
+                showNotification(`Incident auto-created: threshold ${result.incidentThreshold || 3} reached`, 'success', {
+                    title: result.incidentCreated ? 'Incident Auto-Created' : 'Incident Auto-Updated',
+                    meta: result.incident?.title || `${log.attackType} | ${log.sourceIP}`
+                });
+            } else if (result.incidentThreshold && result.similarAlertCount != null) {
+                showNotification(`Similar alerts: ${result.similarAlertCount}/${result.incidentThreshold}`, 'info', {
+                    title: 'Incident Threshold Progress',
+                    meta: `${log.attackType} | ${log.sourceIP}`
+                });
+            }
+        }
     } catch (error) {
-        console.error('Backend incident save failed, saving locally:', error);
-        storeLocalIncident(incident);
-        updateIncidentCount(1);
-        showNotification('Incident saved locally and will show in Incidents tab', 'warning', {
-            title: 'Incident Added Locally',
-            meta: `${log.attackType} | backend unavailable`
-        });
+        console.error('Backend alert save failed:', error);
+        if (!options.silent) {
+            showNotification(error.message || 'Alert creation failed', 'error', {
+                title: 'Alert Not Created',
+                meta: `${log.attackType} | backend unavailable`
+            });
+        }
+        throw error;
     }
 }
 
-// Create Incident from Selected Logs
-async function createIncidentFromSelected() {
+// Backward-compatible alias for older inline handlers.
+async function createIncidentFromLog(logId) {
+    return createAlertFromLog(logId);
+}
+
+// Create Alert from Selected Logs
+async function createAlertFromSelected() {
     if (!canManageLogs()) {
-        showNotification('Only admins can create incidents from selected logs.', 'warning');
+        showNotification('Only admins can create alerts from selected logs.', 'warning');
         return;
     }
     if (selectedLogs.size === 0) return;
@@ -1420,34 +1720,60 @@ async function createIncidentFromSelected() {
         selectedLogData.some(log => log.severity === level)
     ) || 'medium';
 
-    const incident = {
-        id: `local-${Date.now()}-bulk`,
-        title: `Bulk Incident: ${selectedLogIds.length} related logs`,
+    const alert = {
+        title: `Bulk Alert: ${selectedLogIds.length} related logs`,
         description: `Created from ${selectedLogIds.length} selected security logs.\n\nSources: ${selectedLogData.map(log => log.sourceIP).join(', ')}`,
         severity: highestSeverity,
-        status: 'open',
-        assignedTo: null,
-        createdAt: new Date().toISOString(),
-        logs: selectedLogIds,
-        sourceIP: 'Multiple',
-        affectedSystems: [...new Set(selectedLogData.map(log => log.targetSystem))],
-        tags: ['bulk-from-logs']
+        status: 'new',
+        sourceIP: selectedLogData.length === 1 ? selectedLogData[0].sourceIP : 'Multiple',
+        targetSystem: selectedLogData.length === 1 ? selectedLogData[0].targetSystem : 'Multiple',
+        attackType: selectedLogData.length === 1 ? selectedLogData[0].attackType : 'Multiple',
+        ruleId: 'manual_bulk_log_promotion',
+        correlationKey: `manual-bulk-log-alert:${Date.now()}`,
+        evidence: {
+            logIds: selectedLogIds,
+            sourceIPs: [...new Set(selectedLogData.map(log => log.sourceIP))],
+            targetSystems: [...new Set(selectedLogData.map(log => log.targetSystem))],
+            attackTypes: [...new Set(selectedLogData.map(log => log.attackType))]
+        },
+        metadata: {
+            source: 'security-log-bulk-action',
+            promotedFromLogs: true,
+            selectedCount: selectedLogIds.length
+        },
+        tags: ['from-logs', 'manual-alert', 'bulk']
     };
 
     try {
-        const savedIncident = await persistIncident(incident);
-        updateIncidentCount(1);
-        showNotification(`Bulk incident ${savedIncident._id || savedIncident.id || ''} added`, 'success', {
-            title: 'Bulk Incident Created',
+        let result = await persistAlert(alert);
+        try {
+            result = await ensureIncidentForSimilarAlerts(alert, result);
+        } catch (correlationError) {
+            console.warn('Bulk alert-to-incident correlation failed:', correlationError);
+        }
+        const savedAlert = result.alert;
+        updateAlertCount(1);
+        if (result.incidentCreated) updateIncidentCount(1);
+        showNotification(`Bulk alert ${savedAlert._id || savedAlert.id || ''} added`, 'success', {
+            title: 'Bulk Alert Created',
             meta: `${selectedLogIds.length} logs attached`
         });
+        if (result.incident) {
+            showNotification(`Incident auto-created: threshold ${result.incidentThreshold || 3} reached`, 'success', {
+                title: result.incidentCreated ? 'Incident Auto-Created' : 'Incident Auto-Updated',
+                meta: result.incident?.title || 'Correlated alert incident'
+            });
+        } else if (result.incidentThreshold && result.similarAlertCount != null) {
+            showNotification(`Similar alerts: ${result.similarAlertCount}/${result.incidentThreshold}`, 'info', {
+                title: 'Incident Threshold Progress',
+                meta: alert.attackType || 'Bulk alert'
+            });
+        }
     } catch (error) {
-        console.error('Backend bulk incident save failed, saving locally:', error);
-        storeLocalIncident(incident);
-        updateIncidentCount(1);
-        showNotification('Bulk incident saved locally and will show in Incidents tab', 'warning', {
-            title: 'Bulk Incident Added Locally',
-            meta: `${selectedLogIds.length} logs attached`
+        console.error('Backend bulk alert save failed:', error);
+        showNotification(error.message || 'Bulk alert creation failed', 'error', {
+            title: 'Bulk Alert Not Created',
+            meta: `${selectedLogIds.length} logs | backend unavailable`
         });
     }
     
@@ -1455,11 +1781,16 @@ async function createIncidentFromSelected() {
     clearSelection();
 }
 
-// Create Incident from Current Log (in modal)
+// Backward-compatible alias for older inline handlers.
+async function createIncidentFromSelected() {
+    return createAlertFromSelected();
+}
+
+// Create Alert from Current Log (in modal)
 function createIncidentFromCurrentLog() {
     const modal = document.getElementById('log-detail-modal');
     const logId = modal?.querySelector('.log-detail-item')?.textContent?.replace('Log ID:', '').trim();
-    if (logId) createIncidentFromLog(logId);
+    if (logId) createAlertFromLog(logId);
     closeLogModal();
 }
 
@@ -1613,13 +1944,14 @@ function setupMultiSelect() {
         }
         
         select[multiple] option:hover {
-            background: var(--primary-color) !important;
-            color: white !important;
+            background: rgba(34, 211, 238, 0.14) !important;
+            color: var(--text-primary) !important;
         }
         
         select[multiple] option:checked {
-            background: var(--primary-color) !important;
-            color: white !important;
+            background: rgba(34, 211, 238, 0.18) !important;
+            color: var(--text-primary) !important;
+            font-weight: 600;
         }
     `;
     document.head.appendChild(style);
@@ -1689,7 +2021,9 @@ window.showRemediation = showRemediation;
 window.closeRemediationModal = closeRemediationModal;
 window.explainLogWithAI = explainLogWithAI;
 window.closeAIResultModal = closeAIResultModal;
+window.createAlertFromLog = createAlertFromLog;
 window.createIncidentFromLog = createIncidentFromLog;
+window.createAlertFromSelected = createAlertFromSelected;
 window.createIncidentFromSelected = createIncidentFromSelected;
 window.createIncidentFromCurrentLog = createIncidentFromCurrentLog;
 window.exportLogs = exportLogs;

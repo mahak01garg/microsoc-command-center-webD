@@ -9,8 +9,7 @@ const DEFAULT_SETTINGS = {
   },
   alertConfig: {
     failedLoginThreshold: 5,
-    portScanThreshold: 10,
-    ddosThreshold: 1000
+    otherAlertsThreshold: 1
   },
   incidentConfig: {
     createIncidentAfter: 3,
@@ -38,8 +37,8 @@ function normalizeSettings(settings) {
       theme: String(source.generalSettings?.theme || DEFAULT_SETTINGS.generalSettings.theme).toLowerCase() === 'light' ? 'light' : 'dark'
     },
     alertConfig: {
-      ...DEFAULT_SETTINGS.alertConfig,
-      ...(source.alertConfig || {})
+      failedLoginThreshold: coerceNumber(source.alertConfig?.failedLoginThreshold, DEFAULT_SETTINGS.alertConfig.failedLoginThreshold, 1, 100),
+      otherAlertsThreshold: coerceNumber(source.alertConfig?.otherAlertsThreshold, DEFAULT_SETTINGS.alertConfig.otherAlertsThreshold, 1, 1000)
     },
     incidentConfig: {
       ...DEFAULT_SETTINGS.incidentConfig,
@@ -59,9 +58,10 @@ function normalizeSettings(settings) {
   };
 }
 
-function coerceNumber(value, fallback) {
+function coerceNumber(value, fallback, min = -Infinity, max = Infinity) {
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
 }
 
 function coerceBoolean(value, fallback) {
@@ -73,47 +73,30 @@ function coerceBoolean(value, fallback) {
 
 function applyIncomingSettings(target, incoming = {}) {
   if (incoming.generalSettings) {
-    target.generalSettings = {
-      ...target.generalSettings,
-      ...incoming.generalSettings,
-      theme: String(incoming.generalSettings.theme || target.generalSettings.theme).toLowerCase() === 'light' ? 'light' : 'dark',
-      autoRefreshEnabled: coerceBoolean(incoming.generalSettings.autoRefreshEnabled, target.generalSettings.autoRefreshEnabled),
-      refreshIntervalSeconds: coerceNumber(incoming.generalSettings.refreshIntervalSeconds, target.generalSettings.refreshIntervalSeconds)
-    };
+    target.set('generalSettings.theme', String(incoming.generalSettings.theme || target.generalSettings.theme).toLowerCase() === 'light' ? 'light' : 'dark');
+    target.set('generalSettings.autoRefreshEnabled', coerceBoolean(incoming.generalSettings.autoRefreshEnabled, target.generalSettings.autoRefreshEnabled));
+    target.set('generalSettings.refreshIntervalSeconds', coerceNumber(incoming.generalSettings.refreshIntervalSeconds, target.generalSettings.refreshIntervalSeconds, 5, 300));
   }
 
   if (incoming.alertConfig) {
-    target.alertConfig = {
-      ...target.alertConfig,
-      failedLoginThreshold: coerceNumber(incoming.alertConfig.failedLoginThreshold, target.alertConfig.failedLoginThreshold),
-      portScanThreshold: coerceNumber(incoming.alertConfig.portScanThreshold, target.alertConfig.portScanThreshold),
-      ddosThreshold: coerceNumber(incoming.alertConfig.ddosThreshold, target.alertConfig.ddosThreshold)
-    };
+    target.set('alertConfig.failedLoginThreshold', coerceNumber(incoming.alertConfig.failedLoginThreshold, target.alertConfig.failedLoginThreshold, 1, 100));
+    target.set('alertConfig.otherAlertsThreshold', coerceNumber(incoming.alertConfig.otherAlertsThreshold, target.alertConfig.otherAlertsThreshold, 1, 1000));
   }
 
   if (incoming.incidentConfig) {
-    target.incidentConfig = {
-      ...target.incidentConfig,
-      createIncidentAfter: coerceNumber(incoming.incidentConfig.createIncidentAfter, target.incidentConfig.createIncidentAfter),
-      severityEscalationEnabled: coerceBoolean(incoming.incidentConfig.severityEscalationEnabled, target.incidentConfig.severityEscalationEnabled)
-    };
+    target.set('incidentConfig.createIncidentAfter', coerceNumber(incoming.incidentConfig.createIncidentAfter, target.incidentConfig.createIncidentAfter, 1, 20));
+    target.set('incidentConfig.severityEscalationEnabled', coerceBoolean(incoming.incidentConfig.severityEscalationEnabled, target.incidentConfig.severityEscalationEnabled));
   }
 
   if (incoming.aiSettings) {
-    target.aiSettings = {
-      ...target.aiSettings,
-      analysisEnabled: coerceBoolean(incoming.aiSettings.analysisEnabled, target.aiSettings.analysisEnabled),
-      autoGenerateRecommendations: coerceBoolean(incoming.aiSettings.autoGenerateRecommendations, target.aiSettings.autoGenerateRecommendations)
-    };
+    target.set('aiSettings.analysisEnabled', coerceBoolean(incoming.aiSettings.analysisEnabled, target.aiSettings.analysisEnabled));
+    target.set('aiSettings.autoGenerateRecommendations', coerceBoolean(incoming.aiSettings.autoGenerateRecommendations, target.aiSettings.autoGenerateRecommendations));
   }
 
   if (incoming.notificationSettings) {
-    target.notificationSettings = {
-      ...target.notificationSettings,
-      emailNotifications: coerceBoolean(incoming.notificationSettings.emailNotifications, target.notificationSettings.emailNotifications),
-      criticalAlertNotifications: coerceBoolean(incoming.notificationSettings.criticalAlertNotifications, target.notificationSettings.criticalAlertNotifications),
-      incidentAssignmentNotifications: coerceBoolean(incoming.notificationSettings.incidentAssignmentNotifications, target.notificationSettings.incidentAssignmentNotifications)
-    };
+    target.set('notificationSettings.emailNotifications', coerceBoolean(incoming.notificationSettings.emailNotifications, target.notificationSettings.emailNotifications));
+    target.set('notificationSettings.criticalAlertNotifications', coerceBoolean(incoming.notificationSettings.criticalAlertNotifications, target.notificationSettings.criticalAlertNotifications));
+    target.set('notificationSettings.incidentAssignmentNotifications', coerceBoolean(incoming.notificationSettings.incidentAssignmentNotifications, target.notificationSettings.incidentAssignmentNotifications));
   }
 }
 
@@ -148,18 +131,22 @@ exports.updateSettings = async (req, res) => {
     settings.updatedBy = req.user?.email || req.user?.name || 'admin';
     await settings.save();
 
-    await recordAuditEvent(req, {
-      action: 'Settings Updated',
-      module: 'settings',
-      targetType: 'SystemSettings',
-      targetId: String(settings._id),
-      targetLabel: 'Global SOC Settings',
-      details: 'Admin updated general, alert, incident, AI, or notification settings',
-      metadata: {
-        previous: before,
-        next: normalizeSettings(settings)
-      }
-    });
+    try {
+      await recordAuditEvent(req, {
+        action: 'Settings Updated',
+        module: 'settings',
+        targetType: 'SystemSettings',
+        targetId: String(settings._id),
+        targetLabel: 'Global SOC Settings',
+        details: 'Admin updated general, alert, incident, AI, or notification settings',
+        metadata: {
+          previous: before,
+          next: normalizeSettings(settings)
+        }
+      });
+    } catch (auditError) {
+      console.warn('Settings audit log failed:', auditError.message);
+    }
 
     res.status(200).json({
       success: true,
@@ -169,7 +156,7 @@ exports.updateSettings = async (req, res) => {
     console.error('Update settings error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: error.message || 'Server error'
     });
   }
 };

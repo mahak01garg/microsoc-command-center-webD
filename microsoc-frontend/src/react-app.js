@@ -83,6 +83,7 @@
         }
 
         document.body.dataset.theme = nextTheme;
+        document.documentElement.dataset.theme = nextTheme;
         localStorage.setItem('theme', nextTheme);
         updateThemeIcon(nextTheme);
         window.dispatchEvent(new CustomEvent('microsoc:theme-changed', {
@@ -173,6 +174,7 @@
         if (route !== 'audit-logs') {
             installRouteTabs(mainContent, route);
         }
+        installSidebarCollapseToggle();
         ensureAlertsSidebarLink(route);
         reorderSidebarNavigation();
         renderSidebarNavigation(document.getElementById('legacy-page') || document);
@@ -200,6 +202,42 @@
             tag.textContent = `SEC-${String(index + 1).padStart(2, '0')}`;
             card.appendChild(tag);
         });
+    }
+
+    function installSidebarCollapseToggle() {
+        const sidebar = document.getElementById('sidebar') || document.querySelector('.sidebar');
+        const mainContent = document.querySelector('.main-content');
+        const header = sidebar?.querySelector('.sidebar-header');
+        if (!sidebar || !mainContent || !header) return;
+
+        document.body.classList.toggle('sidebar-collapsed', localStorage.getItem('microsocSidebarCollapsed') === 'true');
+
+        let button = header.querySelector('[data-sidebar-collapse]');
+        if (!button) {
+            button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'sidebar-collapse-toggle';
+            button.dataset.sidebarCollapse = 'true';
+            button.setAttribute('aria-label', 'Toggle sidebar');
+            header.appendChild(button);
+        }
+
+        const renderButton = () => {
+            const collapsed = document.body.classList.contains('sidebar-collapsed');
+            button.setAttribute('aria-expanded', String(!collapsed));
+            button.innerHTML = `<i class="fas ${collapsed ? 'fa-angles-right' : 'fa-angles-left'}"></i>`;
+        };
+
+        if (!button.dataset.bound) {
+            button.dataset.bound = 'true';
+            button.addEventListener('click', () => {
+                const collapsed = document.body.classList.toggle('sidebar-collapsed');
+                localStorage.setItem('microsocSidebarCollapsed', String(collapsed));
+                renderButton();
+            });
+        }
+
+        renderButton();
     }
 
     function installRouteTabs(mainContent, route) {
@@ -1321,6 +1359,7 @@
             renderIncidentConsole(root);
         }
         if (route === 'analytics') {
+            relocateAnalyticsInsights(root);
             renderThreatIntel(root);
         }
         applyRoleRestrictions(root);
@@ -1365,7 +1404,7 @@
         root.querySelectorAll('[onclick], button, a, select, input').forEach((element) => {
             const action = element.getAttribute('onclick') || '';
             const label = element.textContent || element.getAttribute('title') || element.getAttribute('aria-label') || '';
-            const adminOnlyAction = /delete|clearLogs|deleteSelectedLogs|assignRole|userManagement|systemSettings|threatFeedConfig|audit|generateMock|createIncidentFromLog|export/i.test(action);
+            const adminOnlyAction = /delete|clearLogs|deleteSelectedLogs|assignRole|userManagement|systemSettings|threatFeedConfig|audit|generateMock|createIncidentFromLog|createAlertFromLog|export/i.test(action);
             const adminOnlyLabel = adminOnlyMatchers.some((matcher) => matcher.test(label));
 
             if (adminOnlyAction || adminOnlyLabel) {
@@ -2503,8 +2542,7 @@
             },
             alertConfig: {
                 failedLoginThreshold: 5,
-                portScanThreshold: 10,
-                ddosThreshold: 1000
+                otherAlertsThreshold: 1
             },
             incidentConfig: {
                 createIncidentAfter: 3,
@@ -2542,7 +2580,19 @@
 
         function cacheSettings(settings) {
             if (!settings) return;
-            localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(settings));
+            localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify({
+                ...settings,
+                _cachedAt: new Date().toISOString()
+            }));
+        }
+
+        function pickNewestSettings(serverSettings, cachedSettings) {
+            if (!serverSettings) return cachedSettings || defaults;
+            if (!cachedSettings) return serverSettings;
+
+            const serverTime = new Date(serverSettings.updatedAt || serverSettings._cachedAt || 0).getTime();
+            const cachedTime = new Date(cachedSettings._cachedAt || cachedSettings.updatedAt || 0).getTime();
+            return cachedTime > serverTime ? cachedSettings : serverSettings;
         }
 
         panel.innerHTML = `
@@ -2617,27 +2667,31 @@
         const notificationFields = panel.querySelector('[data-settings-notifications]');
         const statusGrid = panel.querySelector('[data-settings-status]');
         const saveButton = root.querySelector('[data-settings-save]');
-        const resetButton = root.querySelector('[data-settings-reset]');
 
-        if (!summary || !generalFields || !alertFields || !incidentFields || !aiFields || !notificationFields || !statusGrid || !saveButton || !resetButton) {
+        if (!summary || !generalFields || !alertFields || !incidentFields || !aiFields || !notificationFields || !statusGrid || !saveButton) {
             return;
         }
 
         function setThemePreview(theme) {
             const normalized = String(theme || 'dark').toLowerCase() === 'light' ? 'light' : 'dark';
             document.body.dataset.theme = normalized;
+            document.documentElement.dataset.theme = normalized;
             localStorage.setItem('theme', normalized);
+            updateThemeIcon(normalized);
             const themeStyle = document.getElementById('theme-style');
             if (themeStyle) {
                 themeStyle.setAttribute('href', `css/${normalized}-theme.css?v=20260623t`);
             }
+            window.dispatchEvent(new CustomEvent('microsoc:theme-changed', {
+                detail: { theme: normalized }
+            }));
         }
 
         function renderSummaryView() {
             summary.innerHTML = [
                 ['Theme', draftSettings.generalSettings.theme === 'light' ? 'Light' : 'Dark', 'fa-palette'],
                 ['Auto Refresh', draftSettings.generalSettings.autoRefreshEnabled ? 'Enabled' : 'Disabled', 'fa-arrows-rotate'],
-                ['Alerts', `${draftSettings.alertConfig.failedLoginThreshold}/${draftSettings.alertConfig.portScanThreshold}/${draftSettings.alertConfig.ddosThreshold}`, 'fa-bell'],
+                ['Alert Rules', `Login ${draftSettings.alertConfig.failedLoginThreshold} / Other ${draftSettings.alertConfig.otherAlertsThreshold}`, 'fa-bell'],
                 ['AI', draftSettings.aiSettings.analysisEnabled ? 'On' : 'Off', 'fa-robot']
             ].map(([title, value, icon]) => `
                 <div class="stat-card">
@@ -2715,11 +2769,10 @@
 
             alertFields.innerHTML = `
                 ${numberControl('alertConfig.failedLoginThreshold', 'Failed Login Threshold', 'How many failed logins trigger alerting.', 1, 100, 1)}
-                ${numberControl('alertConfig.portScanThreshold', 'Port Scan Threshold', 'How many scan events trigger alerting.', 1, 1000, 1)}
-                ${numberControl('alertConfig.ddosThreshold', 'DDoS Threshold', 'Traffic spike threshold for DDoS detection.', 10, 100000, 10)}
+                ${numberControl('alertConfig.otherAlertsThreshold', 'Other Alerts Threshold', 'How many non-login attack logs trigger alerting. Set 1 for instant alerts.', 1, 1000, 1)}
                 <div class="settings-help-card">
                     <strong>Detection Rules</strong>
-                    <p>Security logs are always stored, but alerts are created only when these thresholds or immediate-danger rules like SQL Injection/XSS match.</p>
+                    <p>Security logs are always stored. Failed logins use their own threshold; every other attack type uses Other Alerts Threshold.</p>
                 </div>
             `;
 
@@ -2754,7 +2807,9 @@
             panel.querySelectorAll('[data-setting-number]').forEach((input) => {
                 const [section, key] = input.dataset.settingNumber.split('.');
                 if (!draftSettings[section]) draftSettings[section] = {};
-                draftSettings[section][key] = Number(input.value);
+                const fallback = originalSettings?.[section]?.[key] ?? defaults[section]?.[key] ?? 0;
+                const parsed = Number(input.value);
+                draftSettings[section][key] = Number.isFinite(parsed) && input.value !== '' ? parsed : fallback;
             });
 
             panel.querySelectorAll('[data-setting-radio]').forEach((input) => {
@@ -2767,13 +2822,27 @@
         }
 
         function setFormValues(settings) {
+            const incomingAlertConfig = settings?.alertConfig || {};
             draftSettings = {
                 generalSettings: { ...defaults.generalSettings, ...(settings?.generalSettings || {}) },
-                alertConfig: { ...defaults.alertConfig, ...(settings?.alertConfig || {}) },
+                alertConfig: {
+                    failedLoginThreshold: incomingAlertConfig.failedLoginThreshold ?? defaults.alertConfig.failedLoginThreshold,
+                    otherAlertsThreshold: incomingAlertConfig.otherAlertsThreshold ?? defaults.alertConfig.otherAlertsThreshold
+                },
                 incidentConfig: { ...defaults.incidentConfig, ...(settings?.incidentConfig || {}) },
                 aiSettings: { ...defaults.aiSettings, ...(settings?.aiSettings || {}) },
                 notificationSettings: { ...defaults.notificationSettings, ...(settings?.notificationSettings || {}) }
             };
+            renderForms();
+            renderSummaryView();
+        }
+
+        function syncSettingsThemeFromEvent(event) {
+            if (!document.body.contains(panel)) return;
+            const normalized = String(event.detail?.theme || localStorage.getItem('theme') || 'dark').toLowerCase() === 'light' ? 'light' : 'dark';
+            if (!draftSettings.generalSettings) draftSettings.generalSettings = {};
+            if (draftSettings.generalSettings.theme === normalized) return;
+            draftSettings.generalSettings.theme = normalized;
             renderForms();
             renderSummaryView();
         }
@@ -2839,28 +2908,52 @@
             }
 
             const payload = await apiRequest('/settings');
-            const loadedSettings = payload.settings || cached || defaults;
+            const loadedSettings = pickNewestSettings(payload.settings, cached);
             originalSettings = loadedSettings;
             cacheSettings(loadedSettings);
             setFormValues(loadedSettings);
             await loadSystemStatus();
         }
 
-        async function saveSettings() {
+        async function saveSettings(options = {}) {
             syncDraftFromInputs();
-            cacheSettings(draftSettings);
-            originalSettings = JSON.parse(JSON.stringify(draftSettings));
+            const pendingSettings = JSON.parse(JSON.stringify(draftSettings));
+            const actionButton = options.button || null;
+            const originalButtonHtml = actionButton?.innerHTML;
+
+            if (actionButton) {
+                actionButton.disabled = true;
+                actionButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Updating...';
+            }
+
             const payload = await apiRequest('/settings', {
                 method: 'PATCH',
-                body: JSON.stringify(draftSettings)
+                body: JSON.stringify(pendingSettings)
             });
-            const savedSettings = payload.settings || draftSettings;
+            const savedSettings = {
+                ...(payload.settings || {}),
+                ...pendingSettings
+            };
             originalSettings = savedSettings;
             cacheSettings(savedSettings);
             setFormValues(savedSettings);
+            setThemePreview(savedSettings.generalSettings?.theme || pendingSettings.generalSettings?.theme);
             await loadSystemStatus();
+
+            if (options.statusSelector) {
+                const stateNode = panel.querySelector(options.statusSelector);
+                if (stateNode) {
+                    stateNode.textContent = options.statusText || 'Updated. New detection rules apply to new logs.';
+                }
+            }
+
+            if (actionButton) {
+                actionButton.disabled = false;
+                actionButton.innerHTML = originalButtonHtml;
+            }
+
             if (typeof window.showNotification === 'function') {
-                window.showNotification('Settings saved successfully', 'success');
+                window.showNotification(options.message || 'Settings saved successfully', 'success');
             }
         }
 
@@ -2868,9 +2961,11 @@
             if (event.target.matches('[data-setting-number]')) {
                 const [section, key] = event.target.dataset.settingNumber.split('.');
                 if (!draftSettings[section]) draftSettings[section] = {};
-                draftSettings[section][key] = Number(event.target.value);
+                const fallback = originalSettings?.[section]?.[key] ?? defaults[section]?.[key] ?? 0;
+                const parsed = Number(event.target.value);
+                draftSettings[section][key] = Number.isFinite(parsed) && event.target.value !== '' ? parsed : fallback;
                 const valueNode = panel.querySelector(`[data-setting-value="${section}.${key}"]`);
-                if (valueNode) valueNode.textContent = event.target.value;
+                if (valueNode) valueNode.textContent = event.target.value || fallback;
                 renderSummaryView();
             }
         });
@@ -2893,22 +2988,25 @@
             }
         });
 
+        if (window.__microsocSettingsThemeSync) {
+            window.removeEventListener('microsoc:theme-changed', window.__microsocSettingsThemeSync);
+        }
+        window.__microsocSettingsThemeSync = syncSettingsThemeFromEvent;
+        window.addEventListener('microsoc:theme-changed', syncSettingsThemeFromEvent);
+
         saveButton.addEventListener('click', () => {
-            saveSettings().catch((error) => {
+            saveSettings({
+                button: saveButton,
+                message: 'Settings saved successfully'
+            }).catch((error) => {
+                saveButton.disabled = false;
+                saveButton.innerHTML = '<i class="fas fa-save"></i> Save Changes';
                 if (typeof window.showNotification === 'function') {
                     window.showNotification(error.message, 'error');
                 } else {
                     window.alert(error.message);
                 }
             });
-        });
-
-        resetButton.addEventListener('click', () => {
-            if (originalSettings) {
-                setFormValues(originalSettings);
-            } else {
-                setFormValues(defaults);
-            }
         });
 
         loadSettings().catch((error) => {
@@ -3410,6 +3508,18 @@
             map.innerHTML = '<div class="empty-state">Live attack sources unavailable.</div>';
             renderTrendBars(buildHourlyTrendFromLogs(loadLocalSecurityLogs()));
         }
+    }
+
+    function relocateAnalyticsInsights(root) {
+        const contentGrid = root.querySelector('.content-grid');
+        const insightsContainer = root.querySelector('#insights-container');
+        const insightsCard = insightsContainer?.closest('.card');
+
+        if (!contentGrid || !insightsCard || insightsCard.parentElement === contentGrid) return;
+
+        insightsCard.classList.remove('mt-20');
+        insightsCard.classList.add('analytics-insights-card');
+        contentGrid.appendChild(insightsCard);
     }
 
     function renderThreatIntel(root) {
