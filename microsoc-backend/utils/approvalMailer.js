@@ -35,6 +35,10 @@ function buildApprovalLinks(req, token) {
   };
 }
 
+function getFrontendUrl() {
+  return (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+}
+
 async function sendWithSendGrid({ to, subject, html, text }) {
   if (!process.env.SENDGRID_API_KEY) {
     return { skipped: true, reason: 'SENDGRID_API_KEY is not configured' };
@@ -163,7 +167,105 @@ async function sendPasswordResetOtpEmail({ user, otp }) {
   });
 }
 
+async function sendAccessDecisionEmail({ user, decision }) {
+  const approved = decision === 'approved';
+  const disabled = decision === 'disabled';
+  const enabled = decision === 'enabled';
+  const loginUrl = getFrontendUrl();
+  const subject = approved
+    ? 'MicroSOC access approved'
+    : enabled
+      ? 'MicroSOC access enabled'
+    : disabled
+      ? 'MicroSOC access disabled'
+      : 'MicroSOC access request rejected';
+  const text = approved
+    ? [
+        `Hi ${user.name || 'there'},`,
+        ``,
+        `Your MicroSOC access request has been approved by the admin.`,
+        `You can now login here: ${loginUrl}`,
+        ``,
+        `Role: ${user.role || 'analyst'}`
+      ].join('\n')
+    : enabled
+      ? [
+          `Hi ${user.name || 'there'},`,
+          ``,
+          `Your MicroSOC account access has been enabled again by the admin.`,
+          `You can now login here: ${loginUrl}`,
+          ``,
+          `Role: ${user.role || 'analyst'}`
+        ].join('\n')
+    : disabled
+      ? [
+          `Hi ${user.name || 'there'},`,
+          ``,
+          `Your MicroSOC account access has been disabled by the admin.`,
+          `You will not be able to login unless an admin enables your account again.`,
+          ``,
+          `If you believe this was a mistake, please contact the MicroSOC administrator.`
+        ].join('\n')
+    : [
+        `Hi ${user.name || 'there'},`,
+        ``,
+        `Your MicroSOC access request was rejected by the admin.`,
+        `If you believe this was a mistake, please contact the MicroSOC administrator.`
+      ].join('\n');
+  const html = approved
+    ? `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827">
+        <h2>MicroSOC Access Approved</h2>
+        <p>Hi ${user.name || 'there'},</p>
+        <p>Your MicroSOC access request has been approved by the admin.</p>
+        <p><strong>Role:</strong> ${user.role || 'analyst'}</p>
+        <p>
+          <a href="${loginUrl}" style="display:inline-block;padding:10px 14px;background:#0ea5e9;color:white;text-decoration:none;border-radius:6px">Login to MicroSOC</a>
+        </p>
+      </div>
+    `
+    : enabled
+      ? `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827">
+        <h2>MicroSOC Access Enabled</h2>
+        <p>Hi ${user.name || 'there'},</p>
+        <p>Your MicroSOC account access has been enabled again by the admin.</p>
+        <p><strong>Role:</strong> ${user.role || 'analyst'}</p>
+        <p>
+          <a href="${loginUrl}" style="display:inline-block;padding:10px 14px;background:#0ea5e9;color:white;text-decoration:none;border-radius:6px">Login to MicroSOC</a>
+        </p>
+      </div>
+    `
+    : disabled
+      ? `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827">
+        <h2>MicroSOC Access Disabled</h2>
+        <p>Hi ${user.name || 'there'},</p>
+        <p>Your MicroSOC account access has been disabled by the admin.</p>
+        <p>You will not be able to login unless an admin enables your account again.</p>
+        <p>If you believe this was a mistake, please contact the MicroSOC administrator.</p>
+      </div>
+    `
+    : `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827">
+        <h2>MicroSOC Access Request Rejected</h2>
+        <p>Hi ${user.name || 'there'},</p>
+        <p>Your MicroSOC access request was rejected by the admin.</p>
+        <p>If you believe this was a mistake, please contact the MicroSOC administrator.</p>
+      </div>
+    `;
+
+  return sendEmailOrLog({
+    to: user.email,
+    subject,
+    html,
+    text,
+    fallbackLog: () => console.warn(`Access ${decision} email for ${user.email}`)
+  });
+}
+
 module.exports = {
   sendApprovalRequestEmail,
-  sendPasswordResetOtpEmail
+  sendPasswordResetOtpEmail,
+  sendAccessDecisionEmail
 };

@@ -3,7 +3,8 @@ const crypto = require('crypto');
 const { recordAuditEvent, pickRequestIp } = require('../utils/auditLogger');
 const {
   sendApprovalRequestEmail,
-  sendPasswordResetOtpEmail
+  sendPasswordResetOtpEmail,
+  sendAccessDecisionEmail
 } = require('../utils/approvalMailer');
 
 // @desc    Register user
@@ -354,6 +355,11 @@ exports.approveUser = async (req, res) => {
     user.isActive = true;
     await user.save();
 
+    const decisionEmail = await sendAccessDecisionEmail({
+      user,
+      decision: 'approved'
+    });
+
     await recordAuditEvent(req, {
       actor: null,
       actorName: User.getPrimaryAdminEmail(),
@@ -365,7 +371,12 @@ exports.approveUser = async (req, res) => {
       targetId: String(user._id),
       targetLabel: user.email,
       details: `Access approved for ${user.email}`,
-      metadata: { source: 'email-link' }
+      metadata: {
+        source: 'email-link',
+        analystNotified: Boolean(decisionEmail.sent),
+        notificationProvider: decisionEmail.provider || 'console-fallback',
+        notificationError: decisionEmail.error || ''
+      }
     });
 
     res.status(200).send(`<h2>Access approved</h2><p>${user.email} can now login to MicroSOC.</p>`);
@@ -400,6 +411,11 @@ exports.rejectUser = async (req, res) => {
     user.isActive = false;
     await user.save();
 
+    const decisionEmail = await sendAccessDecisionEmail({
+      user,
+      decision: 'rejected'
+    });
+
     await recordAuditEvent(req, {
       actor: null,
       actorName: User.getPrimaryAdminEmail(),
@@ -411,7 +427,12 @@ exports.rejectUser = async (req, res) => {
       targetId: String(user._id),
       targetLabel: user.email,
       details: `Access rejected for ${user.email}`,
-      metadata: { source: 'email-link' }
+      metadata: {
+        source: 'email-link',
+        analystNotified: Boolean(decisionEmail.sent),
+        notificationProvider: decisionEmail.provider || 'console-fallback',
+        notificationError: decisionEmail.error || ''
+      }
     });
 
     res.status(200).send(`<h2>Access rejected</h2><p>${user.email} cannot login to MicroSOC.</p>`);

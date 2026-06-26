@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const { recordAuditEvent } = require('../utils/auditLogger');
+const { sendAccessDecisionEmail } = require('../utils/approvalMailer');
 
 function sanitizeUser(user) {
   return {
@@ -43,6 +44,7 @@ exports.updateUserAccess = async (req, res) => {
   try {
     const { id } = req.params;
     const { action, role } = req.body;
+    let accessNotification = null;
 
     const user = await User.findById(id).select('-password -approvalToken -passwordResetOtp -passwordResetOtpExpires');
 
@@ -100,6 +102,19 @@ exports.updateUserAccess = async (req, res) => {
 
     await user.save();
 
+    if (['approve', 'reject', 'disable', 'enable'].includes(action)) {
+      accessNotification = await sendAccessDecisionEmail({
+        user,
+        decision: action === 'disable'
+          ? 'disabled'
+          : action === 'enable'
+            ? 'enabled'
+            : action === 'approve'
+              ? 'approved'
+              : 'rejected'
+      });
+    }
+
     if (role && ['admin', 'analyst', 'viewer'].includes(role)) {
       const previousRole = user.role;
       user.role = role;
@@ -138,7 +153,13 @@ exports.updateUserAccess = async (req, res) => {
         targetId: String(user._id),
         targetLabel: user.email,
         details: `User ${auditVerbMap[action]} by admin`,
-        metadata: { approvalStatus: user.approvalStatus, isActive: user.isActive }
+        metadata: {
+          approvalStatus: user.approvalStatus,
+          isActive: user.isActive,
+          analystNotified: Boolean(accessNotification?.sent),
+          notificationProvider: accessNotification?.provider || (accessNotification ? 'console-fallback' : ''),
+          notificationError: accessNotification?.error || ''
+        }
       });
     }
 

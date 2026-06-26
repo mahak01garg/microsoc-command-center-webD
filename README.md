@@ -99,6 +99,120 @@ Audit Log Records System Action
 | Settings | Thresholds, theme, notification preferences, AI toggles, system status |
 | Threat Intelligence | CVE lookup, MITRE mapping, and IOC analysis in analyst-friendly cards |
 
+## Authentication And Email Flow
+
+MicroSOC includes a complete auth flow, not only a login screen.
+
+### Signup Approval Flow
+
+When a new user creates an account:
+
+```text
+User Signup
+    |
+    v
+Account Created As Analyst
+    |
+    v
+Status = Pending Approval
+    |
+    v
+SendGrid Sends Approval Email To Admin
+    |
+    v
+Admin Clicks Approve Or Reject Link
+    |
+    v
+SendGrid Sends Decision Email To Analyst
+    |
+    v
+User Can Login Only After Approval
+```
+
+Important behavior:
+
+- New self-registered users are created as analysts.
+- The account remains pending until an admin approves it.
+- SendGrid sends an access request email to the primary admin.
+- The email contains approve and reject links.
+- After the admin approves or rejects, SendGrid emails the analyst with the decision.
+- Pending users cannot login.
+- Rejected users cannot login.
+- Disabled users cannot login until an admin enables them again.
+- Approved users can login normally.
+
+### User Management Email Notifications
+
+Admin actions from User Management also notify the analyst by email.
+
+| Admin Action | Email Sent To Analyst | Result |
+| --- | --- | --- |
+| Approve pending analyst | Access approved email with login link | Analyst can login |
+| Reject pending analyst | Access rejected email | Analyst cannot login |
+| Disable approved analyst | Access disabled email | Analyst cannot login until enabled again |
+| Enable disabled analyst | Access enabled/restored email with login link | Analyst can login again |
+
+These emails are sent through SendGrid. If SendGrid is not configured in local development, the backend writes fallback notification details to the console.
+
+Approval routes:
+
+```text
+GET /api/auth/approve/:token
+GET /api/auth/reject/:token
+```
+
+### Forgot Password Flow
+
+The project also supports forgot password using an OTP email.
+
+```text
+User Clicks Forgot Password
+    |
+    v
+User Enters Email
+    |
+    v
+Backend Generates OTP
+    |
+    v
+SendGrid Sends OTP To User Email
+    |
+    v
+User Enters OTP + New Password
+    |
+    v
+Password Is Updated
+```
+
+Important behavior:
+
+- OTP is sent to the registered user's email.
+- OTP expires in 10 minutes.
+- Password is changed only when email, OTP, and new password are valid.
+- If SendGrid is not configured in local development, the backend logs fallback approval/reset details to the console.
+
+Auth routes:
+
+```text
+POST /api/auth/register
+POST /api/auth/login
+POST /api/auth/request-password-reset
+POST /api/auth/reset-password
+GET  /api/auth/me
+```
+
+SendGrid-related environment variables:
+
+```env
+SENDGRID_API_KEY=
+SENDGRID_FROM_EMAIL=MicroSOC <verified-sender@example.com>
+APPROVAL_EMAIL_FROM=MicroSOC <verified-sender@example.com>
+APPROVAL_REPLY_TO=you@example.com
+BACKEND_PUBLIC_URL=https://your-backend.onrender.com
+```
+
+`SENDGRID_FROM_EMAIL` or `APPROVAL_EMAIL_FROM` must be a verified SendGrid sender or authenticated domain.
+
 ## Detection Pipeline Explained
 
 ### 1. Security Log Generation
@@ -358,7 +472,7 @@ The project uses role-based access at two levels:
 | --- | --- | --- |
 | View dashboard metrics | Yes | Yes |
 | View security logs | Yes | Yes |
-| Start live stream | Yes | Yes, if visible in current view |
+| Start live stream | Yes | No |
 | Generate mock logs | Yes | No |
 | Create log manually | Yes | No |
 | Archive logs | Yes | No |
@@ -373,7 +487,7 @@ The project uses role-based access at two levels:
 | Edit incidents | Yes | No |
 | Assign incidents | Yes | No |
 | Add admin remediation steps | Yes | No |
-| Add analyst note/update where allowed | Yes | Limited |
+| Add analyst note/update where allowed | Yes | No |
 | View audit logs | Yes | No |
 | View user management | Yes | No |
 | Update SOC settings | Yes | No |
@@ -761,14 +875,3 @@ This project demonstrates:
 - Clean analyst-facing UI instead of raw JSON output
 
 It is not just a UI dashboard. It shows how raw telemetry becomes security decisions.
-
-## Future Improvements
-
-- Add unit/integration tests for alert and incident correlation
-- Add real IOC enrichment provider integration
-- Add retention policies for archived records
-- Add search and filters for archived data
-- Add WebSocket-based push updates across all pages
-- Add exportable incident reports
-- Add dashboards per analyst/team
-- Add more realistic threat intelligence scoring
