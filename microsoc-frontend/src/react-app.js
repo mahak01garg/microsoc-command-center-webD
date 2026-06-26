@@ -50,9 +50,8 @@
     const sidebarObservers = new WeakMap();
     let pageIntegrityObserver = null;
 
-    window.MICROSOC_API_BASE_URL = ['localhost', '127.0.0.1'].includes(window.location.hostname)
-        ? LOCAL_API_BASE_URL
-        : HOSTED_API_BASE_URL;
+    window.MICROSOC_API_BASE_URL = localStorage.getItem('microsocApiBaseUrl')
+        || (localStorage.getItem('microsocUseLocalApi') === 'true' ? LOCAL_API_BASE_URL : HOSTED_API_BASE_URL);
 
     function getRouteFromHash() {
         const route = window.location.hash.replace(/^#\/?/, '').split('?')[0];
@@ -171,6 +170,7 @@
             return;
         }
 
+        syncRouteChrome(route, mainContent);
         if (route !== 'audit-logs') {
             installRouteTabs(mainContent, route);
         }
@@ -203,6 +203,67 @@
             tag.textContent = `SEC-${String(index + 1).padStart(2, '0')}`;
             card.appendChild(tag);
         });
+    }
+
+    function syncRouteChrome(route, mainContent) {
+        const routeChrome = {
+            dashboard: {
+                icon: 'fa-tachometer-alt',
+                title: 'Dashboard Overview',
+                subtitle: 'Real-time security monitoring of the Morphin Grid'
+            },
+            logs: {
+                icon: 'fa-stream',
+                title: 'Security Logs',
+                subtitle: 'Real-time monitoring and analysis of security events'
+            },
+            alerts: {
+                icon: 'fa-bell',
+                title: 'Threat Detection & Alerts',
+                subtitle: 'Persistent alert queue, lifecycle actions, and evidence-backed detections.'
+            },
+            incidents: {
+                icon: 'fa-exclamation-triangle',
+                title: 'Incident Management',
+                subtitle: 'Monitor and manage security incidents'
+            },
+            analytics: {
+                icon: 'fa-chart-line',
+                title: 'Security Analytics',
+                subtitle: 'Advanced threat intelligence and pattern analysis'
+            },
+            settings: {
+                icon: 'fa-cogs',
+                title: 'Settings',
+                subtitle: 'Threat thresholds, alert rules, and system configs'
+            },
+            'user-management': {
+                icon: 'fa-users-cog',
+                title: 'User Management',
+                subtitle: 'View every user in MicroSOC and control access instantly.'
+            },
+            'audit-logs': {
+                icon: 'fa-clipboard-list',
+                title: 'Audit Logs',
+                subtitle: 'Review admin actions, system events, and security changes.'
+            }
+        };
+
+        const chrome = routeChrome[route];
+        const header = mainContent.querySelector(':scope > .main-header');
+        if (header && chrome) {
+            const title = header.querySelector('.header-left h1');
+            const subtitle = header.querySelector('.header-left .subtitle');
+            if (title) title.innerHTML = `<i class="fas ${chrome.icon}"></i> ${chrome.title}`;
+            if (subtitle) subtitle.textContent = chrome.subtitle;
+        }
+
+        if (route === 'alerts') {
+            mainContent.querySelector('#incidents-table')?.closest('.content-grid')?.remove();
+            mainContent.querySelector('#new-incident-modal')?.remove();
+            mainContent.querySelector('.main-header .filter-controls')?.remove();
+            mainContent.querySelector('.main-header button[onclick*="openNewIncidentModal"]')?.remove();
+        }
     }
 
     function installSidebarCollapseToggle() {
@@ -414,9 +475,9 @@
                         }
                     })
                 });
-                const payload = await response.json().catch(() => ({}));
+                const payload = await parseAssistantResponse(response);
                 if (!response.ok || !payload.success) {
-                    throw new Error(payload.message || 'Assistant failed');
+                    throw new Error(payload.detail || payload.message || 'Assistant failed');
                 }
 
                 const data = payload.data || {};
@@ -427,12 +488,30 @@
                 thinking.textContent = `${answer}${nextActions}`;
             } catch (error) {
                 console.error('AI assistant failed:', error);
-                const message = String(error.message || '').toLowerCase();
-                thinking.textContent = message.includes('provider rejected')
-                    ? 'I am ready to help, but the external AI provider rejected that request. Try asking again, or ask me to summarize alerts, explain an attack, or suggest mitigation steps.'
+                const errorText = String(error.message || '').toLowerCase();
+                thinking.textContent = errorText.includes('provider rejected')
+                    ? 'AI provider rejected the request. Please check backend AI key/model configuration, then try again.'
                     : (error.message || 'MicroSOC AI could not respond right now.');
             }
         });
+    }
+
+    async function parseAssistantResponse(response) {
+        const contentType = response.headers.get('content-type') || '';
+        const bodyText = await response.text();
+        if (!contentType.includes('application/json') || /^\s*</.test(bodyText)) {
+            return {
+                success: false,
+                message: response.status === 401
+                    ? 'Your login session expired. Please login again.'
+                    : 'Assistant backend returned a non-JSON response.'
+            };
+        }
+        try {
+            return JSON.parse(bodyText);
+        } catch (error) {
+            return { success: false, message: 'Assistant backend returned invalid JSON.' };
+        }
     }
 
     function appendAIMessage(container, text, role) {
@@ -1136,6 +1215,7 @@
         document.title = page.title || 'MicroSOC Command Center';
         document.body.className = page.bodyClass || '';
         document.body.dataset.theme = localStorage.getItem('theme') || 'dark';
+        document.documentElement.dataset.theme = document.body.dataset.theme;
         document.body.dataset.reactRoute = route;
     }
 
@@ -2778,6 +2858,12 @@
             });
         }
 
+        function scheduleSettingsThemeApply() {
+            applySettingsTheme();
+            requestAnimationFrame(applySettingsTheme);
+            setTimeout(applySettingsTheme, 80);
+        }
+
         const escapeHtml = (value) => String(value ?? '')
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
@@ -2946,6 +3032,7 @@
             if (themeStyle) {
                 themeStyle.setAttribute('href', `css/${normalized}-theme.css?v=20260623t`);
             }
+            scheduleSettingsThemeApply();
             window.dispatchEvent(new CustomEvent('microsoc:theme-changed', {
                 detail: { theme: normalized }
             }));
@@ -3009,14 +3096,15 @@
         function numberControl(path, label, help, min, max, step = 1) {
             const [section, key] = path.split('.');
             const value = Number(draftSettings[section]?.[key] ?? defaults[section]?.[key] ?? min);
+            const unit = path === 'generalSettings.refreshIntervalSeconds' ? ' sec' : '';
             return `
                 <label class="settings-control">
                     <div class="settings-control-head">
                         <span>${escapeHtml(label)}</span>
-                        <strong data-setting-value="${escapeHtml(path)}">${escapeHtml(value)}</strong>
+                        <strong data-setting-value="${escapeHtml(path)}">${escapeHtml(`${value}${unit}`)}</strong>
                     </div>
                     <input type="number" min="${min}" max="${max}" step="${step}" value="${escapeHtml(value)}" data-setting-number="${path}">
-                    <small>${escapeHtml(help)}</small>
+                    <small>${escapeHtml(help)}${unit ? ' Unit: seconds.' : ''}</small>
                 </label>
             `;
         }
@@ -3083,8 +3171,12 @@
 
         function setFormValues(settings) {
             const incomingAlertConfig = settings?.alertConfig || {};
+            const themeHref = document.getElementById('theme-style')?.getAttribute('href') || '';
+            const activeTheme = themeHref.includes('light-theme') || document.body.dataset.theme === 'light' || localStorage.getItem('theme') === 'light'
+                ? 'light'
+                : 'dark';
             draftSettings = {
-                generalSettings: { ...defaults.generalSettings, ...(settings?.generalSettings || {}) },
+                generalSettings: { ...defaults.generalSettings, ...(settings?.generalSettings || {}), theme: activeTheme },
                 alertConfig: {
                     failedLoginThreshold: incomingAlertConfig.failedLoginThreshold ?? defaults.alertConfig.failedLoginThreshold,
                     otherAlertsThreshold: incomingAlertConfig.otherAlertsThreshold ?? defaults.alertConfig.otherAlertsThreshold
@@ -3101,10 +3193,13 @@
             if (!document.body.contains(panel)) return;
             const normalized = String(event.detail?.theme || localStorage.getItem('theme') || 'dark').toLowerCase() === 'light' ? 'light' : 'dark';
             if (!draftSettings.generalSettings) draftSettings.generalSettings = {};
-            if (draftSettings.generalSettings.theme === normalized) return;
+            const changed = draftSettings.generalSettings.theme !== normalized;
             draftSettings.generalSettings.theme = normalized;
-            renderForms();
-            renderSummaryView();
+            if (changed) {
+                renderForms();
+                renderSummaryView();
+            }
+            scheduleSettingsThemeApply();
         }
 
         function renderStatus(statusPayload = {}) {
@@ -3196,6 +3291,9 @@
             };
             originalSettings = savedSettings;
             cacheSettings(savedSettings);
+            window.dispatchEvent(new CustomEvent('microsoc:settings-updated', {
+                detail: { settings: savedSettings }
+            }));
             setFormValues(savedSettings);
             setThemePreview(savedSettings.generalSettings?.theme || pendingSettings.generalSettings?.theme);
             await loadSystemStatus();
@@ -3225,7 +3323,10 @@
                 const parsed = Number(event.target.value);
                 draftSettings[section][key] = Number.isFinite(parsed) && event.target.value !== '' ? parsed : fallback;
                 const valueNode = panel.querySelector(`[data-setting-value="${section}.${key}"]`);
-                if (valueNode) valueNode.textContent = event.target.value || fallback;
+                if (valueNode) {
+                    const unit = `${section}.${key}` === 'generalSettings.refreshIntervalSeconds' ? ' sec' : '';
+                    valueNode.textContent = `${event.target.value || fallback}${unit}`;
+                }
                 renderSummaryView();
             }
         });

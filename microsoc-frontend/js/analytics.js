@@ -185,6 +185,74 @@ function severityWeight(severity) {
     return { critical: 95, high: 75, medium: 50, low: 25 }[String(severity).toLowerCase()] || 35;
 }
 
+function topEntriesFromCounts(counts, limit = 8) {
+    return Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, limit)
+        .map(([name, count]) => ({ name, count }));
+}
+
+function summarizeLogsForAI(logs) {
+    const severityCounts = countBy(logs, log => log.severity || 'medium');
+    const attackTypeCounts = countBy(logs, log => log.attackType || 'Other');
+    const sourceCounts = countBy(logs, log => log.sourceIP || 'Unknown');
+    const targetCounts = countBy(logs, log => log.targetSystem || 'Unknown');
+    const countryCounts = countBy(logs, log => log.country || 'Unknown');
+    const blocked = logs.filter(log => log.isBlocked).length;
+    const unblockedCriticalHigh = logs
+        .filter(log => !log.isBlocked && ['critical', 'high'].includes(log.severity))
+        .slice(0, 12)
+        .map(log => ({
+            timestamp: log.timestamp,
+            attackType: log.attackType,
+            sourceIP: log.sourceIP,
+            targetSystem: log.targetSystem,
+            severity: log.severity,
+            country: log.country,
+            description: String(log.description || '').slice(0, 180)
+        }));
+
+    return {
+        totalLogs: logs.length,
+        blocked,
+        unblocked: logs.length - blocked,
+        blockedRate: logs.length ? Number(((blocked / logs.length) * 100).toFixed(1)) : 0,
+        severityCounts,
+        topAttackTypes: topEntriesFromCounts(attackTypeCounts),
+        topSources: topEntriesFromCounts(sourceCounts),
+        topTargets: topEntriesFromCounts(targetCounts),
+        topCountries: topEntriesFromCounts(countryCounts),
+        unblockedCriticalHigh,
+        recentSamples: logs.slice(0, 25).map(log => ({
+            timestamp: log.timestamp,
+            attackType: log.attackType,
+            sourceIP: log.sourceIP,
+            targetSystem: log.targetSystem,
+            severity: log.severity,
+            isBlocked: log.isBlocked,
+            country: log.country
+        }))
+    };
+}
+
+function buildAIReportPayload() {
+    const logs = getAnalyticsLogs();
+    return {
+        generatedFrom: 'analytics-page',
+        timeRange: document.getElementById('time-period')?.value || 'all',
+        riskScore: document.getElementById('risk-score')?.textContent || `${calculateAnalyticsRiskScore(logs)}%`,
+        telemetry: summarizeLogsForAI(logs),
+        analyticsSummary: {
+            patterns: (analyticsData.patterns || []).slice(0, 8),
+            anomalies: (analyticsData.anomalies || []).slice(0, 8),
+            predictions: (analyticsData.predictions || []).slice(0, 8),
+            remediations: (analyticsData.remediations || []).slice(0, 8),
+            topSources: (analyticsData.topSources || []).slice(0, 8)
+        },
+        instruction: 'Generate a concise SOC analyst report from summarized telemetry. Do not ask for raw logs.'
+    };
+}
+
 function formatEmptyState(message) {
     return `<div style="padding: 18px; color: var(--text-secondary);">${escapeHtml(message)}</div>`;
 }
@@ -1161,7 +1229,7 @@ function renderAIInsights(insights) {
                 </div>
             ` : ''}
             <div class="insight-footer">
-                <small><i class="fas fa-clock"></i> Generated ${timeAgo(insight.timestamp)}${insight.mode ? ` | ${escapeHtml(insight.mode === 'ai' ? 'AI model' : 'local fallback')}` : ''}</small>
+                <small><i class="fas fa-clock"></i> Generated ${timeAgo(insight.timestamp)}${insight.mode ? ` | ${escapeHtml(insight.mode === 'ai' ? 'AI model' : insight.mode)}` : ''}</small>
             </div>
         </div>
     `).join('');
@@ -1198,6 +1266,23 @@ function renderAIInsightsError(message) {
     `;
 }
 
+async function parseAIReportResponse(response) {
+    const contentType = response.headers.get('content-type') || '';
+    const bodyText = await response.text();
+    const looksLikeHtml = /^\s*<!doctype html/i.test(bodyText) || /^\s*<html/i.test(bodyText);
+
+    if (!contentType.includes('application/json') || looksLikeHtml) {
+        const statusText = response.status ? `HTTP ${response.status}` : 'non-JSON response';
+        throw new Error(`AI backend returned ${statusText} instead of JSON. Check API base URL, backend route, or login session.`);
+    }
+
+    try {
+        return JSON.parse(bodyText);
+    } catch (error) {
+        throw new Error('AI backend returned invalid JSON.');
+    }
+}
+
 // Generate AI Insights
 async function generateAIInsights() {
     if (!analyticsLogsReady) {
@@ -1215,16 +1300,11 @@ async function generateAIInsights() {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
             },
-            body: JSON.stringify({
-                analytics: analyticsData,
-                logs: getAnalyticsLogs(),
-                riskScore: document.getElementById('risk-score')?.textContent || '68',
-                generatedFrom: 'analytics-page'
-            })
+            body: JSON.stringify(buildAIReportPayload())
         });
-        const payload = await response.json();
+        const payload = await parseAIReportResponse(response);
         if (!response.ok || !payload.success) {
-            throw new Error(payload.message || 'AI report failed');
+            throw new Error(payload.detail || payload.message || 'AI report failed');
         }
 
         const report = payload.data || {};
@@ -1244,8 +1324,8 @@ async function generateAIInsights() {
         showNotification('AI SOC report generated', 'success');
     } catch (error) {
         console.error('AI insights failed:', error);
-        renderAIInsightsError(error.message || 'AI report failed. Please check backend login/session.');
-        showNotification('AI report failed. Please check backend login/session.', 'error');
+        renderAIInsightsError(error.message || 'AI provider failed. Please check backend AI configuration.');
+        showNotification('AI provider failed. Please check backend AI configuration.', 'error');
     }
 }
 
@@ -1327,6 +1407,9 @@ function calculateAnalyticsRiskScore(logs) {
 }
 
 function updateAnalyticsStats() {
+    const analyticsRoot = document.getElementById('time-period')?.closest('.main-content');
+    if (!analyticsRoot) return;
+
     const logs = getAnalyticsLogs();
     const total = logs.length;
     const blocked = logs.filter(log => log.isBlocked).length;
@@ -1342,12 +1425,13 @@ function updateAnalyticsStats() {
     };
     
     // Update stat cards
-    document.querySelectorAll('.stat-value')[0].textContent = `${stats.detectionRate}%`;
-    document.querySelectorAll('.stat-value')[1].textContent = `${stats.preventionSuccess}%`;
-    document.querySelectorAll('.stat-value')[2].textContent = stats.responseTime;
-    document.querySelectorAll('.stat-value')[3].textContent = `${stats.aiConfidence}%`;
+    const statValues = analyticsRoot.querySelectorAll('.stats-grid .stat-value');
+    if (statValues[0]) statValues[0].textContent = `${stats.detectionRate}%`;
+    if (statValues[1]) statValues[1].textContent = `${stats.preventionSuccess}%`;
+    if (statValues[2]) statValues[2].textContent = stats.responseTime;
+    if (statValues[3]) statValues[3].textContent = `${stats.aiConfidence}%`;
 
-    const riskScore = document.getElementById('risk-score');
+    const riskScore = analyticsRoot.querySelector('#risk-score');
     if (riskScore) {
         riskScore.textContent = `${calculateAnalyticsRiskScore(logs)}%`;
     }

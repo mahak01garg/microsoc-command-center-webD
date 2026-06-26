@@ -8,6 +8,8 @@ const DASHBOARD_LIVE_STREAM_TAB_ID_KEY = 'microsocLiveStreamTabId';
 const DASHBOARD_LOG_STORAGE_KEY = 'microsocSecurityLogs';
 const DASHBOARD_DELETED_LOG_IDS_KEY = 'microsocDeletedLogIds';
 const DASHBOARD_FETCH_TIMEOUT_MS = 2500;
+const DASHBOARD_SETTINGS_CACHE_KEY = 'microsocSystemSettingsCache';
+const DEFAULT_DASHBOARD_REFRESH_SECONDS = 30;
 
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'https://microsoc-backend.onrender.com/api';
@@ -46,9 +48,66 @@ function initDashboard() {
     setInterval(updateTime, 1000);
     refreshDashboardLiveView();
     syncDashboardLiveStreamFromState();
-    if (!dashboardRefreshTimer) {
-        dashboardRefreshTimer = setInterval(refreshDashboardLiveView, 5000);
+    configureDashboardAutoRefresh();
+    syncDashboardSettingsFromServer();
+}
+
+function readDashboardRefreshSettings() {
+    try {
+        const settings = JSON.parse(localStorage.getItem(DASHBOARD_SETTINGS_CACHE_KEY) || '{}');
+        const generalSettings = settings.generalSettings || {};
+        const enabled = generalSettings.autoRefreshEnabled !== false;
+        const seconds = Number(generalSettings.refreshIntervalSeconds || DEFAULT_DASHBOARD_REFRESH_SECONDS);
+        return {
+            enabled,
+            seconds: Number.isFinite(seconds) ? Math.min(300, Math.max(5, seconds)) : DEFAULT_DASHBOARD_REFRESH_SECONDS
+        };
+    } catch (error) {
+        return { enabled: true, seconds: DEFAULT_DASHBOARD_REFRESH_SECONDS };
     }
+}
+
+function configureDashboardAutoRefresh() {
+    if (dashboardRefreshTimer) {
+        clearInterval(dashboardRefreshTimer);
+        dashboardRefreshTimer = null;
+    }
+
+    const { enabled, seconds } = readDashboardRefreshSettings();
+    if (!enabled) return;
+    dashboardRefreshTimer = setInterval(refreshDashboardLiveView, seconds * 1000);
+}
+
+async function syncDashboardSettingsFromServer() {
+    try {
+        const { response, payload } = await fetchJsonWithTimeout(
+            `${getApiBaseUrl()}/settings`,
+            { headers: getAuthHeaders() },
+            2500
+        );
+        if (!response.ok || !payload.settings) return;
+        localStorage.setItem(DASHBOARD_SETTINGS_CACHE_KEY, JSON.stringify({
+            ...payload.settings,
+            _cachedAt: new Date().toISOString()
+        }));
+        configureDashboardAutoRefresh();
+    } catch (error) {
+        console.warn('Dashboard settings sync skipped:', error.message);
+    }
+}
+
+if (!window.__dashboardSettingsRefreshSync) {
+    window.__dashboardSettingsRefreshSync = true;
+    window.addEventListener('storage', (event) => {
+        if (event.key === DASHBOARD_SETTINGS_CACHE_KEY && document.querySelector('#stats-container')) {
+            configureDashboardAutoRefresh();
+        }
+    });
+    window.addEventListener('microsoc:settings-updated', () => {
+        if (document.querySelector('#stats-container')) {
+            configureDashboardAutoRefresh();
+        }
+    });
 }
 
 function removeDashboardStreamControls() {

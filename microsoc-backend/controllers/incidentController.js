@@ -1,7 +1,9 @@
 const Incident = require('../models/Incident');
 const Log = require('../models/Log');
 const User = require('../models/User');
+const SystemSettings = require('../models/SystemSettings');
 const { recordAuditEvent } = require('../utils/auditLogger');
+const { sendIncidentAssignmentEmail } = require('../utils/approvalMailer');
 
 function canAccessIncident(incident, user) {
   if (!incident || !user) return false;
@@ -523,10 +525,12 @@ exports.assignIncident = async (req, res) => {
       });
     }
 
+    let assignedUser = null;
+
     // Check if user exists
     if (userId) {
-      const user = await User.findById(userId);
-      if (!user) {
+      assignedUser = await User.findById(userId);
+      if (!assignedUser) {
         return res.status(404).json({
           success: false,
           message: 'User not found'
@@ -554,6 +558,25 @@ exports.assignIncident = async (req, res) => {
       .populate('assignedTo', 'name email avatar')
       .populate('createdBy', 'name email');
 
+    let assignmentNotification = null;
+    if (assignedUser) {
+      const settings = await SystemSettings.getSingleton();
+      const notifications = settings.notificationSettings || {};
+      const shouldNotify = notifications.emailNotifications !== false
+        && notifications.incidentAssignmentNotifications !== false;
+
+      if (shouldNotify) {
+        assignmentNotification = await sendIncidentAssignmentEmail({
+          user: assignedUser,
+          incident: populatedIncident,
+          assignedBy: req.user?.email || req.user?.name || 'Admin',
+          note
+        });
+      } else {
+        assignmentNotification = { skipped: true, reason: 'Incident assignment notifications disabled in settings' };
+      }
+    }
+
     await recordAuditEvent(req, {
       action: 'Incident Assigned',
       module: 'incidents',
@@ -563,7 +586,13 @@ exports.assignIncident = async (req, res) => {
       details: userId
         ? `Incident assigned to ${userId}`
         : `Incident unassigned`,
-      metadata: { userId: userId || null, note: note || '' }
+      metadata: {
+        userId: userId || null,
+        note: note || '',
+        notificationSent: Boolean(assignmentNotification?.sent),
+        notificationSkipped: Boolean(assignmentNotification?.skipped),
+        notificationReason: assignmentNotification?.reason || assignmentNotification?.error || ''
+      }
     });
 
     res.status(200).json({

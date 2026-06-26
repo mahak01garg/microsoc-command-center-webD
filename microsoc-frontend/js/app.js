@@ -453,6 +453,7 @@ function toggleTheme() {
     // Update theme
     themeStyle.setAttribute('href', `css/${newTheme}-theme.css?v=${ASSET_VERSION}`);
     document.body.dataset.theme = newTheme;
+    document.documentElement.dataset.theme = newTheme;
     localStorage.setItem('theme', newTheme);
     
     // Update icon

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const Log = require('../models/Log');
 const Incident = require('../models/Incident');
+const SystemSettings = require('../models/SystemSettings');
 
 const AI_PROVIDER = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : 'openai')).toLowerCase();
 const AI_BASE_URL = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
@@ -10,14 +11,31 @@ const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || proce
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
 const AI_REQUIRE_PROVIDER = true;
-const AI_ALLOW_LOCAL_FALLBACK = String(process.env.AI_ALLOW_LOCAL_FALLBACK || 'true').toLowerCase() === 'true';
+const AI_ALLOW_LOCAL_FALLBACK = false;
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 15000);
 const AI_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 450);
-const AI_FORCE_RESPONSE_FORMAT = String(process.env.AI_FORCE_RESPONSE_FORMAT || (!IS_OPENROUTER)).toLowerCase() === 'true';
+const AI_FORCE_RESPONSE_FORMAT = !IS_OPENROUTER
+  && String(process.env.AI_FORCE_RESPONSE_FORMAT || 'true').toLowerCase() === 'true';
 const AI_FALLBACK_MODELS = String(process.env.AI_FALLBACK_MODELS || '')
   .split(',')
   .map(model => model.trim())
   .filter(Boolean);
+
+async function getAiSettings() {
+  const settings = await SystemSettings.getSingleton();
+  return {
+    analysisEnabled: settings.aiSettings?.analysisEnabled !== false,
+    autoGenerateRecommendations: settings.aiSettings?.autoGenerateRecommendations !== false
+  };
+}
+
+function sendAiDisabled(res, message) {
+  return res.status(403).json({
+    success: false,
+    mode: 'disabled',
+    message
+  });
+}
 
 function redactSensitive(input) {
   const sensitiveKeys = /password|passwd|pwd|token|api[_-]?key|secret/i;
@@ -358,7 +376,7 @@ function normalizeChatData(data = {}, fallbackData = {}) {
 function getOpenAiModelCandidates() {
   const candidates = [AI_MODEL, ...AI_FALLBACK_MODELS];
   if (IS_OPENROUTER) {
-    candidates.push('openrouter/auto', 'openai/gpt-4o-mini');
+    candidates.push('openai/gpt-4o-mini', 'openrouter/auto');
   } else {
     candidates.push('gpt-4o-mini');
   }
@@ -411,6 +429,9 @@ async function callOpenAiJson(systemPrompt, safePayload, model = AI_MODEL) {
   }
 
   const body = await response.json();
+  if (body.error) {
+    throw new Error(`AI provider error: ${JSON.stringify(body.error).slice(0, 240)}`);
+  }
   const content = body.choices?.[0]?.message?.content;
   if (Array.isArray(content)) {
     return content.map(part => part.text || part.content || '').join('');
@@ -566,8 +587,21 @@ exports.triageIncident = async (req, res) => {
 
 exports.generateReport = async (req, res) => {
   try {
+    const settings = await getAiSettings();
+    if (!settings.analysisEnabled) {
+      return sendAiDisabled(res, 'AI analysis is disabled in SOC settings.');
+    }
+    if (!settings.autoGenerateRecommendations) {
+      return sendAiDisabled(res, 'AI report generation is disabled by Auto Generate Recommendations setting.');
+    }
+
     const result = await callAiJson(
-      'You are a SOC reporting assistant. Generate an executive-ready JSON report with title, riskScore, confidence, summary, keyFindings, recommendedActions, and watchlist.',
+      [
+        'You are a SOC reporting assistant.',
+        'Generate an executive-ready JSON report with title, riskScore, confidence, summary, keyFindings, recommendedActions, and watchlist.',
+        'The user may send summarized telemetry instead of raw logs. Use the provided counts, top attack types, top sources, critical samples, anomalies, predictions, and remediations.',
+        'Do not say that raw logs are missing if summarized telemetry is available.'
+      ].join(' '),
       req.body
     );
 
@@ -596,19 +630,10 @@ exports.generateReport = async (req, res) => {
 
 exports.chat = async (req, res) => {
   const message = req.body.message || '';
-  const localFirstAnswer = fallbackChat(message, req.body.context || {});
-  const shouldAnswerLocally = isLocalChatIntent(message);
 
-  if (shouldAnswerLocally) {
-    res.json({
-      success: true,
-      mode: 'local',
-      data: normalizeChatData({
-        answer: localFirstAnswer,
-        nextActions: []
-      })
-    });
-    return;
+  const settings = await getAiSettings();
+  if (!settings.analysisEnabled) {
+    return sendAiDisabled(res, 'AI analysis is disabled in SOC settings.');
   }
 
   const recentAlerts = await Log.find()
@@ -648,13 +673,11 @@ exports.chat = async (req, res) => {
     result.data = normalizeChatData(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
-    const fallback = fallbackChatPayload(message, payload.context);
-    console.warn('AI chat provider failed, using fallback:', error.message);
-    res.json({
-      success: true,
-      mode: 'fallback',
-      data: fallback,
-      providerError: error.message
+    res.status(502).json({
+      success: false,
+      mode: 'ai_error',
+      message: 'AI provider rejected the request',
+      detail: error.message
     });
   }
 };
@@ -663,6 +686,11 @@ exports.naturalSearch = async (req, res) => {
   const query = String(req.body.query || '');
 
   try {
+    const settings = await getAiSettings();
+    if (!settings.analysisEnabled) {
+      return sendAiDisabled(res, 'AI analysis is disabled in SOC settings.');
+    }
+
     const result = await callAiJson(
       [
         'You convert SOC log search text into JSON filters.',

@@ -3,6 +3,8 @@
 let incidents = [];
 let assignableUsersCache = [];
 const ARCHIVED_INCIDENTS_KEY = 'microsocArchivedIncidentIds';
+const INCIDENT_CACHE_KEY = 'microsocIncidentCache';
+const INCIDENT_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'http://localhost:5001/api';
@@ -35,6 +37,39 @@ function getStoredLocalIncidents() {
         return [];
     }
 }
+
+function getCachedIncidents() {
+    try {
+        const payload = JSON.parse(localStorage.getItem(INCIDENT_CACHE_KEY) || '{}');
+        if (!payload || !Array.isArray(payload.incidents)) return [];
+        if (Date.now() - Number(payload.savedAt || 0) > INCIDENT_CACHE_TTL_MS) return [];
+        return payload.incidents.map(normalizeIncident);
+    } catch (error) {
+        return [];
+    }
+}
+
+function cacheIncidents(list) {
+    try {
+        localStorage.setItem(INCIDENT_CACHE_KEY, JSON.stringify({
+            savedAt: Date.now(),
+            incidents: (Array.isArray(list) ? list : []).slice(0, 100)
+        }));
+    } catch (error) {
+        console.warn('Could not cache incidents:', error);
+    }
+}
+
+function uniqueIncidents(list) {
+    const seen = new Set();
+    return (Array.isArray(list) ? list : []).filter((incident) => {
+        const key = String(incident.id || incident._id || '');
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
 
 function getArchivedIncidentIds() {
     try {
@@ -326,6 +361,18 @@ async function submitIncidentAssignment() {
 
 // Load Incidents
 async function loadIncidents() {
+    renderIncidentLoading();
+    const cachedIncidents = filterArchivedIncidents(uniqueIncidents([
+        ...getCachedIncidents(),
+        ...getStoredLocalIncidents().map(normalizeIncident)
+    ])).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    if (cachedIncidents.length) {
+        incidents = cachedIncidents;
+        syncIncidentRoleUi();
+        renderInciments(incidents);
+        renderIncidentStats(null, incidents);
+    }
+
     try {
         const query = '?limit=50';
         const res = await fetch(`${getApiBaseUrl()}/incidents${query}`, {
@@ -352,12 +399,15 @@ async function loadIncidents() {
         });
 
         incidents = filterArchivedIncidents(mergedIncidents).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        cacheIncidents(incidents);
         syncIncidentRoleUi();
         renderInciments(incidents);
         renderIncidentStats(data.stats, incidents);
     } catch (err) {
         console.error("Failed to load incidents", err);
-        incidents = filterArchivedIncidents(getStoredLocalIncidents().map(normalizeIncident));
+        incidents = cachedIncidents.length
+            ? cachedIncidents
+            : filterArchivedIncidents(getStoredLocalIncidents().map(normalizeIncident));
         syncIncidentRoleUi();
         if (incidents.length) {
             renderInciments(incidents);
@@ -401,6 +451,18 @@ function renderIncidentError(message) {
     const tbody = document.querySelector('#incidents-table tbody');
     if (!tbody) return;
     tbody.innerHTML = `<tr><td colspan="7">${escapeHtml(message)}</td></tr>`;
+}
+
+function renderIncidentLoading() {
+    const tbody = document.querySelector('#incidents-table tbody');
+    if (!tbody || tbody.children.length) return;
+    tbody.innerHTML = `
+        <tr>
+            <td colspan="7" style="padding:24px;text-align:center;">
+                <i class="fas fa-spinner fa-spin"></i> Loading incidents...
+            </td>
+        </tr>
+    `;
 }
 
 function renderIncidentStats(stats, incidentList = incidents) {

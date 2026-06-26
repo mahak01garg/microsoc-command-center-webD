@@ -4,6 +4,12 @@ MicroSOC Command Center is a full-stack Security Operations Center dashboard bui
 
 The project is designed to show more than a static dashboard. It demonstrates how security telemetry can move through a detection pipeline and become analyst-ready information.
 
+## Live Demo
+
+```text
+https://microsoc-command-center-web-d.vercel.app/
+```
+
 ## What This Project Does
 
 MicroSOC helps an analyst/admin monitor and investigate security events through:
@@ -27,12 +33,13 @@ MicroSOC helps an analyst/admin monitor and investigate security events through:
 | Frontend | HTML, CSS, JavaScript, React runtime bundle pattern |
 | Frontend server | Custom Node dev server |
 | Backend | Node.js, Express.js |
-| Database | MongoDB with Mongoose |
+| Database | MongoDB Atlas with Mongoose |
 | Auth | JWT, bcrypt |
 | Realtime | WebSocket/SSE style threat feed support |
 | Security helpers | Helmet, CORS, role-based access checks |
 | AI integration | OpenAI/OpenRouter or Gemini-compatible configuration |
 | Email integration | SendGrid for approval/reset flows |
+| Deployment | Frontend on Vercel, backend on Render, database on MongoDB Atlas |
 
 ## Folder Structure
 
@@ -153,6 +160,8 @@ Admin actions from User Management also notify the analyst by email.
 | Enable disabled analyst | Access enabled/restored email with login link | Analyst can login again |
 
 These emails are sent through SendGrid. If SendGrid is not configured in local development, the backend writes fallback notification details to the console.
+
+These access-control emails are treated as account/security lifecycle emails. They are intentionally separate from SOC notification preferences so that approval, rejection, disable, enable, and password reset messages are not accidentally hidden by dashboard notification toggles.
 
 Approval routes:
 
@@ -754,18 +763,46 @@ Settings control behavior for new data generated after the setting is changed.
 | --- | --- |
 | Theme | Switch light/dark UI |
 | Auto Refresh | Keep dashboards updated |
-| Refresh Interval | Dashboard refresh timing |
+| Refresh Interval | Dashboard refresh timing in seconds |
 | Failed Login Threshold | Brute force alert trigger |
 | Other Alerts Threshold | Non-login attack alert trigger |
 | Create Incident After | Similar alert count required for incident |
-| Severity Escalation | Allows repeated alerts to escalate into incidents |
+| Severity Escalation | Allows repeated alerts to raise existing incident severity/priority |
 | AI Analysis | Enables AI-assisted analysis |
 | Auto Generate Recommendations | Allows AI-generated response suggestions |
-| Email Notifications | Sends security updates by email when configured |
-| Critical Alert Notifications | Sends notifications for critical detections |
-| Incident Assignment Notifications | Notifies analysts when assigned |
+| Email Notifications | Master switch for SOC operational email notifications |
+| Critical Alert Notifications | Sends admin email notifications for critical detections |
+| Incident Assignment Notifications | Notifies analysts when an incident is assigned to them |
 
 Detailed incident rule logic is documented in this README instead of the Settings UI to keep the product screen clean.
+
+### Settings Enforcement Matrix
+
+The Settings page is not only visual. These controls are connected to runtime behavior.
+
+| Setting | Applies To | Behavior |
+| --- | --- | --- |
+| Theme | Frontend UI | Changes the command center theme instantly and persists it |
+| Auto Refresh | Dashboard | Enables/disables dashboard polling |
+| Refresh Interval | Dashboard | Controls dashboard refresh interval in seconds, from 5 to 300 |
+| Failed Login Threshold | Threat pipeline | Controls how many failed login/brute-force style logs create an alert |
+| Other Alerts Threshold | Threat pipeline | Controls how many non-login attack logs create an alert |
+| Create Incident After | Threat pipeline and alert correlation | Controls how many similar alerts create/update an incident |
+| Severity Escalation | Existing incident updates | When off, repeated alerts can attach to incidents without auto-raising severity/priority |
+| AI Analysis | AI chat/search/report endpoints | When off, AI-assisted analysis is blocked |
+| Auto Generate Recommendations | AI report/recommendation generation | When off, generated recommendation/report responses are blocked |
+| Email Notifications | SOC operational notifications | Master switch for critical alert and assignment emails |
+| Critical Alert Notifications | Critical alert email flow | Sends admin email only when master email notifications are also on |
+| Incident Assignment Notifications | Incident assignment email flow | Sends analyst assignment email only when master email notifications are also on |
+
+Important note:
+
+```text
+Settings affect new activity after the setting is saved.
+Existing logs, alerts, incidents, and audit records are not rewritten.
+```
+
+For example, if `Create Incident After` is changed from `3` to `2`, the next correlation run uses `2`; old incidents remain unchanged.
 
 ## Security Score Formula
 
@@ -827,20 +864,37 @@ This is closer to real SOC tools, where security records should usually be retai
 
 ## Deployment Notes
 
+Actual deployment stack used:
+
+| Layer | Platform |
+| --- | --- |
+| Frontend | Vercel |
+| Backend | Render |
+| Database | MongoDB Atlas |
+
+Production URLs:
+
+| Service | URL |
+| --- | --- |
+| Frontend | `https://microsoc-command-center-web-d.vercel.app/` |
+| Backend | `https://microsoc-backend.onrender.com` |
+
 ### Backend
 
-Deploy the backend to a Node-compatible platform such as Render, Railway, or similar.
+The backend is deployed on Render as a Node.js service.
 
 Set environment variables:
 
 ```env
 NODE_ENV=production
 PORT=5001
-MONGODB_URI=your_mongodb_connection_string
+MONGODB_URI=your_mongodb_atlas_connection_string
 JWT_SECRET=your_secret
-FRONTEND_URL=https://your-frontend-url
-BACKEND_PUBLIC_URL=https://your-backend-url
+FRONTEND_URL=https://microsoc-command-center-web-d.vercel.app
+BACKEND_PUBLIC_URL=https://microsoc-backend.onrender.com
 ```
+
+`MONGODB_URI` points to the MongoDB Atlas cluster.
 
 The backend uses:
 
@@ -852,11 +906,34 @@ This allows deployed environments behind a proxy to capture the real client IP f
 
 ### Frontend
 
-Deploy the frontend to a static hosting platform such as Vercel/Netlify.
+The frontend is deployed on Vercel:
+
+```text
+https://microsoc-command-center-web-d.vercel.app/
+```
 
 Make sure the frontend API base URL points to the deployed backend.
 
 Also make sure the backend `FRONTEND_URL` matches the deployed frontend origin for CORS.
+
+### Database
+
+MongoDB Atlas is used as the production database.
+
+The backend connects to Atlas through:
+
+```env
+MONGODB_URI=mongodb+srv://USER:PASSWORD@HOST/DATABASE
+```
+
+Atlas stores:
+
+- Users and approval status
+- Security logs
+- Alerts
+- Incidents
+- Audit logs
+- System settings
 
 ## Why This Project Is Strong For A Portfolio
 

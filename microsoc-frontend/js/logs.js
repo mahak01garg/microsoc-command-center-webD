@@ -657,6 +657,19 @@ function updateLogStats() {
     updateCardMeta('unique-sources', `<i class="fas fa-network-wired"></i> ${uniqueSources} sources`, uniqueSources > 0 ? 'negative' : 'neutral');
 }
 
+window.refreshLogStats = updateLogStats;
+
+if (!window.__logStatsThemeRepairInstalled) {
+    window.__logStatsThemeRepairInstalled = true;
+    window.addEventListener('microsoc:theme-changed', () => {
+        window.setTimeout(() => {
+            if (document.getElementById('total-logs') && typeof updateLogStats === 'function') {
+                updateLogStats();
+            }
+        }, 0);
+    });
+}
+
 function buildLogApiQuery(options = {}) {
     const includeFilters = options.includeFilters !== false;
     const params = new URLSearchParams();

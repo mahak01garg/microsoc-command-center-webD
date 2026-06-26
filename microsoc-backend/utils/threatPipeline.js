@@ -4,6 +4,7 @@ const Alert = require('../models/Alert');
 const SystemSettings = require('../models/SystemSettings');
 const realtimeHub = require('./realtimeHub');
 const jobQueue = require('./jobQueue');
+const { sendCriticalAlertEmail } = require('./approvalMailer');
 
 const JOB_RETRY_LIMIT = 3;
 const JOB_BASE_BACKOFF_MS = 250;
@@ -48,6 +49,10 @@ const DEFAULT_PIPELINE_SETTINGS = {
   incidentConfig: {
     createIncidentAfter: 3,
     severityEscalationEnabled: true
+  },
+  notificationSettings: {
+    emailNotifications: true,
+    criticalAlertNotifications: true
   }
 };
 
@@ -236,6 +241,10 @@ function normalizePipelineSettings(settings) {
     incidentConfig: {
       ...DEFAULT_PIPELINE_SETTINGS.incidentConfig,
       ...(source.incidentConfig || {})
+    },
+    notificationSettings: {
+      ...DEFAULT_PIPELINE_SETTINGS.notificationSettings,
+      ...(source.notificationSettings || {})
     }
   };
 }
@@ -611,6 +620,22 @@ async function broadcastDetection(log, detection, alert, incidentResult) {
   });
 }
 
+async function maybeNotifyCriticalAlert(log, alert, settings) {
+  const notifications = settings.notificationSettings || {};
+  const shouldNotify = notifications.emailNotifications !== false
+    && notifications.criticalAlertNotifications !== false
+    && String(alert?.severity || '').toLowerCase() === 'critical';
+
+  if (!shouldNotify) return null;
+
+  try {
+    return await sendCriticalAlertEmail({ alert, log });
+  } catch (error) {
+    console.error('Critical alert notification failed:', error.message);
+    return { sent: false, error: error.message };
+  }
+}
+
 async function processJob(job) {
   const settings = await getPipelineSettings();
   const detections = await detectThreats(job.log, settings);
@@ -628,6 +653,7 @@ async function processJob(job) {
     if (shouldCreateIncident) {
       incidentResult = await createOrUpdateIncident(job.log, detection, job.userId, settings);
     }
+    await maybeNotifyCriticalAlert(job.log, alert, settings);
     await broadcastDetection(job.log, detection, alert, incidentResult);
   }
 

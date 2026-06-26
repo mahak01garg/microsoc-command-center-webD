@@ -196,6 +196,7 @@ function buildSimilarityQuery(alert) {
 async function correlateAlertToIncident(alert, userId, req) {
   const settings = await SystemSettings.getSingleton();
   const threshold = Math.max(1, Number(settings.incidentConfig?.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD);
+  const severityEscalationEnabled = settings.incidentConfig?.severityEscalationEnabled !== false;
   const { query, scope, ruleKey, correlationTag } = buildSimilarityQuery(alert);
   const similarAlerts = await Alert.find(query).sort({ lastSeen: 1 });
 
@@ -266,9 +267,11 @@ async function correlateAlertToIncident(alert, userId, req) {
       `${similarAlerts.length} alerts matched ${alert.ruleId || alert.attackType || 'rule'} by same ${scope.label}${scope.value ? ` (${scope.value})` : ''}.`
     );
   } else {
-    incident.severity = highestSeverity;
-    incident.priority = highestSeverity;
-    incident.impact = highestSeverity;
+    if (severityEscalationEnabled) {
+      incident.severity = highestSeverity;
+      incident.priority = highestSeverity;
+      incident.impact = highestSeverity;
+    }
     incident.affectedSystems = [...new Set([...(incident.affectedSystems || []), ...affectedSystems])];
     incident.relatedLogs = [...new Set([...(incident.relatedLogs || []).map(String), ...relatedLogs])];
     incident.tags = [...new Set([...(incident.tags || []), AUTO_INCIDENT_TAG, correlationTag, ruleKey])];
@@ -316,6 +319,7 @@ async function correlateAlertToIncident(alert, userId, req) {
         attackType: alert.attackType,
         similarAlertCount: similarAlerts.length,
         threshold,
+        severityEscalationEnabled,
         correlation: scope
       }
     });
