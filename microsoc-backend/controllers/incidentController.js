@@ -11,6 +11,17 @@ function canAccessIncident(incident, user) {
   return String(assignedToId || '') === String(user.id) || String(createdById || '') === String(user.id);
 }
 
+function isSystemGeneratedIncident(incident = {}) {
+  const tags = Array.isArray(incident.tags) ? incident.tags.map(tag => String(tag).toLowerCase()) : [];
+  const source = String(incident.metadata?.source || '').toLowerCase();
+  return Boolean(incident.systemGenerated)
+    || Boolean(incident.metadata?.systemGenerated)
+    || tags.includes('auto-alert-correlation')
+    || tags.includes('frontend-fallback')
+    || source.includes('auto')
+    || source.includes('system');
+}
+
 // @desc    Get all incidents
 // @route   GET /api/incidents
 // @access  Private
@@ -28,7 +39,9 @@ exports.getIncidents = async (req, res) => {
     } = req.query;
 
     // Build query
-    const query = {};
+    const query = {
+      archived: { $ne: true }
+    };
 
     if (req.user.role !== 'admin') {
       query.$or = [
@@ -277,17 +290,20 @@ exports.createIncident = async (req, res) => {
       .populate('createdBy', 'name email')
       .populate('assignedTo', 'name email');
 
+    const systemGenerated = isSystemGeneratedIncident(incidentData);
     await recordAuditEvent(req, {
-      action: 'Incident Created',
+      systemAction: systemGenerated,
+      action: systemGenerated ? 'Auto Incident Created' : 'Incident Created',
       module: 'incidents',
       targetType: 'Incident',
       targetId: String(populatedIncident._id),
       targetLabel: populatedIncident.title,
-      details: `Created incident "${populatedIncident.title}"`,
+      details: `${systemGenerated ? 'Auto-created' : 'Created'} incident "${populatedIncident.title}"`,
       metadata: {
         severity: populatedIncident.severity,
         status: populatedIncident.status,
-        sourceIP: populatedIncident.sourceIP
+        sourceIP: populatedIncident.sourceIP,
+        tags: populatedIncident.tags || []
       }
     });
 
@@ -318,6 +334,10 @@ exports.updateIncident = async (req, res) => {
 
     const { id } = req.params;
     const updateData = { ...req.body };
+    if (updateData.archived === true) {
+      updateData.archivedAt = new Date();
+      updateData.archivedBy = req.user.id;
+    }
 
     const incident = await Incident.findById(id);
 
@@ -337,9 +357,9 @@ exports.updateIncident = async (req, res) => {
 
     // Add timeline event for update
     await incident.addTimelineEvent(
-      'Incident updated',
+      updateData.archived === true ? 'Incident archived' : 'Incident updated',
       req.user.id,
-      'Incident details were updated'
+      updateData.archived === true ? 'Incident was archived from the active queue' : 'Incident details were updated'
     );
 
     const populatedIncident = await Incident.findById(id)

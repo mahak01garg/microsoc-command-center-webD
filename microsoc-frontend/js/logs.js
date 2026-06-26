@@ -11,11 +11,14 @@ let liveRenderTimer = null;
 let pendingLiveLogs = [];
 let lastLiveNotificationAt = 0;
 let autoConvertedLiveLogIds = new Set();
+let autoAlertCorrelationState = {};
 let currentPage = 1;
 let itemsPerPage = 25;
 let totalPages = 1;
 const LOG_STORAGE_KEY = 'microsocSecurityLogs';
 const DELETED_LOG_IDS_KEY = 'microsocDeletedLogIds';
+const ARCHIVED_LOG_IDS_KEY = 'microsocArchivedLogIds';
+const ARCHIVED_LOGS_KEY = 'microsocArchivedLogs';
 const ALERT_CORRELATION_CACHE_KEY = 'microsocAlertCorrelationCache';
 const MAX_STORED_LOGS = 1000;
 const MAX_ALERT_CORRELATION_CACHE = 1000;
@@ -25,6 +28,11 @@ const LIVE_RENDER_DEBOUNCE_MS = 250;
 const LIVE_NOTIFICATION_MIN_GAP_MS = 9000;
 const LIVE_STREAM_STATE_KEY = 'microsocLiveStreamState';
 const LIVE_STREAM_TAB_ID_KEY = 'microsocLiveStreamTabId';
+const DEFAULT_INCIDENT_THRESHOLD = 3;
+const DEFAULT_ALERT_SETTINGS = {
+    failedLoginThreshold: 5,
+    otherAlertsThreshold: 1
+};
 let logsApiRefreshTimer = null;
 
 function getCurrentUserRole() {
@@ -58,24 +66,20 @@ function syncLogRoleUi() {
         if (title) title.textContent = 'Total Logs';
     });
 
+    document.querySelectorAll('#bulk-actions, #selected-delete-btn').forEach(element => {
+        element.style.display = 'none';
+    });
+
     const headerButtonSelectors = [
-        '.log-controls .btn-primary',
         '.log-controls .btn-danger',
         '.log-controls button[onclick*="clearLogs"]',
         '.log-controls button[onclick*="deleteSelectedLogs"]',
-        '.log-controls button[onclick*="exportLogs"]',
-        '.log-controls button[onclick*="exportSelectedLogs"]',
-        '.log-controls button[onclick*="createIncidentFromSelected"]',
-        '.log-controls button[onclick*="createAlertFromSelected"]'
+        '.log-controls button[onclick*="exportSelectedLogs"]'
     ];
 
     headerButtonSelectors.forEach(selector => {
         document.querySelectorAll(selector).forEach(button => {
-            const label = (button.textContent || '').toLowerCase();
-            const shouldHide = !canManageLogs() && /clear|delete|export|create incident|create alert|bulk/i.test(label);
-            if (shouldHide) {
-                button.style.display = 'none';
-            }
+            button.style.display = 'none';
         });
     });
 
@@ -90,47 +94,38 @@ function syncLogRoleUi() {
         headerSubtitle.textContent = 'View-only access for analysts';
     }
 
-    ensureSelectedDeleteButton();
     syncSelectionColumnVisibility();
     updateSelectedCount();
 }
 
 function ensureSelectedDeleteButton() {
-    const headerActions = document.querySelector('#search-logs')?.closest('.header-actions');
-    if (!headerActions || document.getElementById('selected-delete-btn')) return;
-
-    const button = document.createElement('button');
-    button.id = 'selected-delete-btn';
-    button.type = 'button';
-    button.className = 'btn-icon log-selected-delete';
-    button.title = 'Delete selected logs';
-    button.setAttribute('aria-label', 'Delete selected logs');
-    button.innerHTML = '<i class="fas fa-trash"></i><span class="selected-delete-count">0</span>';
-    button.addEventListener('click', deleteSelectedLogs);
-    headerActions.appendChild(button);
+    document.getElementById('selected-delete-btn')?.remove();
 }
 
 function syncSelectionColumnVisibility() {
     const selectAll = document.getElementById('select-all');
     const headerCell = selectAll?.closest('th');
-    const canSelect = canManageLogs();
 
     if (headerCell) {
         headerCell.classList.add('log-select-header');
-        headerCell.style.display = canSelect ? '' : 'none';
+        headerCell.style.display = 'none';
     }
 
     if (selectAll) {
-        selectAll.checked = canSelect ? selectAll.checked : false;
-        selectAll.disabled = !canSelect;
+        selectAll.checked = false;
+        selectAll.disabled = true;
+        selectAll.style.display = 'none';
     }
 
-    if (!canSelect) {
-        selectedLogs.clear();
-        document.querySelectorAll('.log-select-cell').forEach(cell => {
-            cell.style.display = 'none';
-        });
-    }
+    selectedLogs.clear();
+    document.querySelectorAll('.log-select-cell').forEach(cell => {
+        cell.style.display = 'none';
+    });
+    document.querySelectorAll('.log-checkbox').forEach(input => {
+        input.checked = false;
+        input.disabled = true;
+        input.style.display = 'none';
+    });
 }
 
 function getLiveStreamTabId() {
@@ -206,7 +201,7 @@ function getApiBaseUrl() {
 function loadStoredLogs() {
     try {
         const stored = JSON.parse(localStorage.getItem(LOG_STORAGE_KEY) || '[]');
-        return filterDeletedLogs(Array.isArray(stored) ? stored : []);
+        return filterArchivedLogs(filterDeletedLogs(Array.isArray(stored) ? stored.map(normalizeLog) : []));
     } catch (error) {
         return [];
     }
@@ -227,13 +222,43 @@ function rememberDeletedLogIds(ids) {
     localStorage.setItem(DELETED_LOG_IDS_KEY, JSON.stringify(Array.from(deletedIds).slice(-3000)));
 }
 
+function getArchivedLogIds() {
+    try {
+        const ids = JSON.parse(localStorage.getItem(ARCHIVED_LOG_IDS_KEY) || '[]');
+        return new Set(Array.isArray(ids) ? ids.map(String) : []);
+    } catch (error) {
+        return new Set();
+    }
+}
+
+function rememberArchivedLog(log) {
+    const archivedIds = getArchivedLogIds();
+    const logId = getLogId(log);
+    archivedIds.add(logId);
+    localStorage.setItem(ARCHIVED_LOG_IDS_KEY, JSON.stringify(Array.from(archivedIds).slice(-3000)));
+
+    try {
+        const archivedLogs = JSON.parse(localStorage.getItem(ARCHIVED_LOGS_KEY) || '[]');
+        const normalized = { ...normalizeLog(log), archived: true, archivedAt: new Date().toISOString() };
+        const nextLogs = [normalized, ...(Array.isArray(archivedLogs) ? archivedLogs : []).filter(item => getLogId(item) !== logId)];
+        localStorage.setItem(ARCHIVED_LOGS_KEY, JSON.stringify(nextLogs.slice(0, MAX_STORED_LOGS)));
+    } catch (error) {
+        console.warn('Could not store archived log locally:', error);
+    }
+}
+
 function filterDeletedLogs(logs) {
     const deletedIds = getDeletedLogIds();
     return (Array.isArray(logs) ? logs : []).filter(log => !deletedIds.has(getLogId(log)));
 }
 
+function filterArchivedLogs(logs) {
+    const archivedIds = getArchivedLogIds();
+    return (Array.isArray(logs) ? logs : []).filter(log => !archivedIds.has(getLogId(log)) && log.archived !== true);
+}
+
 function saveStoredLogs() {
-    const sortedLogs = filterDeletedLogs([...allLogs]).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const sortedLogs = filterArchivedLogs(filterDeletedLogs([...allLogs])).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     allLogs = sortedLogs;
     localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(sortedLogs.slice(0, MAX_STORED_LOGS)));
     window.dispatchEvent(new CustomEvent('microsoc:logs-updated', { detail: { logs: allLogs } }));
@@ -247,7 +272,101 @@ function isBackendLogId(id) {
     return /^[a-f0-9]{24}$/i.test(String(id || ''));
 }
 
+function getThreatContextForAttack(attackType) {
+    const key = String(attackType || '').toLowerCase();
+    const contexts = [
+        {
+            match: ['microsoft outlook exploit', 'outlook exploit', 'outlook elevation'],
+            cves: ['CVE-2023-23397'],
+            mitre: 'T1203 - Exploitation for Client Execution'
+        },
+        {
+            match: ['apache struts exploit', 'struts exploit'],
+            cves: ['CVE-2017-5638'],
+            mitre: 'T1190 - Exploit Public-Facing Application'
+        },
+        {
+            match: ['exchange server exploit', 'exchange exploit', 'proxylogon', 'proxyshell'],
+            cves: ['CVE-2021-26855', 'CVE-2021-34473'],
+            mitre: 'T1190 - Exploit Public-Facing Application'
+        },
+        {
+            match: ['log4shell exploit', 'log4j exploit', 'log4shell'],
+            cves: ['CVE-2021-44228'],
+            mitre: 'T1190 - Exploit Public-Facing Application'
+        },
+        {
+            match: ['sql injection', 'sqli'],
+            cves: [],
+            mitre: 'T1190 - Exploit Public-Facing Application'
+        },
+        {
+            match: ['xss', 'cross-site scripting'],
+            cves: [],
+            mitre: 'T1190 - Exploit Public-Facing Application'
+        },
+        {
+            match: ['password spraying', 'password spray'],
+            cves: [],
+            mitre: 'T1110.003 - Password Spraying'
+        },
+        {
+            match: ['brute force', 'credential stuffing', 'credential'],
+            cves: [],
+            mitre: 'T1110 - Brute Force'
+        },
+        {
+            match: ['ddos', 'dos'],
+            cves: [],
+            mitre: 'T1499 - Endpoint Denial of Service'
+        },
+        {
+            match: ['port scan', 'scan'],
+            cves: [],
+            mitre: 'T1046 - Network Service Discovery'
+        },
+        {
+            match: ['phishing', 'phish'],
+            cves: [],
+            mitre: 'T1566 - Phishing'
+        },
+        {
+            match: ['malware'],
+            cves: [],
+            mitre: 'T1204 - User Execution'
+        },
+        {
+            match: ['powershell abuse', 'powershell'],
+            cves: [],
+            mitre: 'T1059.001 - PowerShell'
+        },
+        {
+            match: ['ransomware'],
+            cves: [],
+            mitre: 'T1486 - Data Encrypted for Impact'
+        }
+    ];
+    return contexts.find(context => context.match.some(value => key.includes(value))) || {
+        cves: [],
+        mitre: 'T1190 - Exploit Public-Facing Application'
+    };
+}
+
+function getRelatedCves(item) {
+    const existing = item?.relatedCves || item?.cves || item?.evidence?.relatedCves || item?.metadata?.relatedCves;
+    if (Array.isArray(existing) && existing.length) return existing;
+    const context = getThreatContextForAttack(item?.attackType || item?.title || item?.description);
+    return context.cves;
+}
+
+function renderCveChips(item) {
+    return getRelatedCves(item)
+        .map(cve => `<span class="badge badge-info">${escapeHtml(cve)}</span>`)
+        .join('');
+}
+
 function normalizeLog(log) {
+    const threatContext = getThreatContextForAttack(log.attackType || log.description);
     return {
         ...log,
         id: getLogId(log),
@@ -261,7 +380,9 @@ function normalizeLog(log) {
         isBlocked: Boolean(log.isBlocked),
         userAgent: log.userAgent || 'Unknown',
         port: log.port || '-',
-        protocol: log.protocol || 'Other'
+        protocol: log.protocol || 'Other',
+        mitreTechnique: log.mitreTechnique || threatContext.mitre,
+        metadata: log.metadata || {}
     };
 }
 
@@ -423,13 +544,12 @@ function loadLogsForPage() {
 function renderLogs() {
     const container = document.getElementById('logs-container');
     if (!container) return;
-    const canSelectLogs = canManageLogs();
     syncSelectionColumnVisibility();
     
     if (!currentLogs.length) {
         container.innerHTML = `
             <tr>
-                <td colspan="${canSelectLogs ? 9 : 8}" style="text-align: center; padding: 24px;">
+                <td colspan="8" style="text-align: center; padding: 24px;">
                     No logs match the current filters. Start live stream to detect new attacks.
                 </td>
             </tr>
@@ -440,11 +560,6 @@ function renderLogs() {
         const jsLogId = escapeJsString(logId);
         return `
         <tr class="log-row" data-id="${escapeHtml(logId)}">
-            ${canSelectLogs ? `<td class="log-select-cell">
-                <input type="checkbox" class="log-checkbox" 
-                       onchange="toggleLogSelection('${jsLogId}')" 
-                       ${selectedLogs.has(logId) ? 'checked' : ''}>
-            </td>` : ''}
             <td class="timestamp-cell">
                 <div class="log-time">${formatDate(log.timestamp)}</div>
                 <div class="log-date">${new Date(log.timestamp).toLocaleDateString()}</div>
@@ -493,6 +608,7 @@ function renderLogs() {
                         <i class="fas fa-brain"></i>
                     </button>
                     ${canManageLogs() ? `<button class="btn-icon" onclick="createAlertFromLog('${jsLogId}')" title="Create Alert"><i class="fas fa-bell"></i></button>` : ''}
+                    ${canManageLogs() ? `<button class="btn-icon" onclick="archiveLog('${jsLogId}')" title="Archive Log"><i class="fas fa-archive"></i></button>` : ''}
                 </div>
             </td>
         </tr>
@@ -619,7 +735,8 @@ async function persistLiveLogsToBackend(logs) {
             userAgent: log.userAgent,
             port: log.port,
             protocol: log.protocol,
-            metadata: log.metadata || {}
+            metadata: log.metadata || {},
+            mitreTechnique: log.mitreTechnique || getThreatContextForAttack(log.attackType).mitre
         })))
     });
 
@@ -680,6 +797,10 @@ function filterLogs(options = {}) {
     }
     
     filteredLogs = allLogs.filter(log => {
+        if (log.archived === true) {
+            return false;
+        }
+
         // Filter by severity
         if (severityFilter.length > 0 && !severityFilter.includes(log.severity)) {
             return false;
@@ -875,7 +996,23 @@ window.addEventListener('beforeunload', () => {
 function addNewLiveLog() {
     if (!isLiveStreaming) return;
 
-    const attackTypes = ['XSS', 'SQL Injection', 'Port Scan', 'Brute Force', 'DDoS'];
+    const attackTypes = [
+        'XSS',
+        'SQL Injection',
+        'Port Scan',
+        'Brute Force',
+        'DDoS',
+        'Phishing',
+        'Credential Stuffing',
+        'Password Spraying',
+        'Malware',
+        'PowerShell Abuse',
+        'Ransomware',
+        'Microsoft Outlook Exploit',
+        'Apache Struts Exploit',
+        'Exchange Server Exploit',
+        'Log4Shell Exploit'
+    ];
     const severities = ['critical', 'high', 'medium', 'low'];
     const attackType = attackTypes[Math.floor(Math.random() * attackTypes.length)];
     const targetSystem = ['web-server-01', 'db-server-01', 'auth-server-01', 'api-gateway', 'firewall-01'][Math.floor(Math.random() * 5)];
@@ -892,7 +1029,8 @@ function addNewLiveLog() {
         isBlocked: Math.random() > 0.5,
         userAgent: 'Live Stream',
         port: Math.floor(Math.random() * 65535),
-        protocol: 'TCP'
+        protocol: 'TCP',
+        mitreTechnique: getThreatContextForAttack(attackType).mitre
     };
     
     pendingLiveLogs.unshift(newLog);
@@ -904,12 +1042,82 @@ function scheduleLiveLogFlush() {
     liveRenderTimer = setTimeout(flushLiveLogs, LIVE_RENDER_DEBOUNCE_MS);
 }
 
+async function getAlertThresholdSettings() {
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/settings`, {
+            headers: {
+                'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+            }
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.message || 'Settings unavailable');
+        return {
+            failedLoginThreshold: Math.max(1, Number(data.settings?.alertConfig?.failedLoginThreshold) || DEFAULT_ALERT_SETTINGS.failedLoginThreshold),
+            otherAlertsThreshold: Math.max(1, Number(data.settings?.alertConfig?.otherAlertsThreshold) || DEFAULT_ALERT_SETTINGS.otherAlertsThreshold)
+        };
+    } catch (error) {
+        console.warn('Alert threshold fallback:', error);
+        return { ...DEFAULT_ALERT_SETTINGS };
+    }
+}
+
+function getAlertThresholdForLog(log, settings) {
+    const attackType = String(log?.attackType || '').toLowerCase();
+    return attackType.includes('brute force')
+        ? settings.failedLoginThreshold
+        : settings.otherAlertsThreshold;
+}
+
+function getLiveAlertCorrelationKey(log) {
+    const scope = getAlertCorrelationScope(log);
+    return [
+        String(log?.attackType || 'unknown').toLowerCase(),
+        scope.field || 'scope',
+        scope.value || 'any'
+    ].join('|');
+}
+
+function countSimilarLiveLogs(log) {
+    const key = getLiveAlertCorrelationKey(log);
+    return allLogs.filter(item => getLiveAlertCorrelationKey(item) === key).length;
+}
+
+async function maybePromoteLiveLogToAlert(logsToMerge) {
+    const settings = await getAlertThresholdSettings();
+    const candidates = logsToMerge.filter(log => !autoConvertedLiveLogIds.has(getLogId(log)));
+
+    for (const log of candidates) {
+        const threshold = getAlertThresholdForLog(log, settings);
+        const key = getLiveAlertCorrelationKey(log);
+        const similarCount = countSimilarLiveLogs(log);
+        const lastAlertedCount = Number(autoAlertCorrelationState[key] || 0);
+
+        if (similarCount < threshold || similarCount < lastAlertedCount + threshold) continue;
+
+        autoAlertCorrelationState[key] = similarCount;
+        autoConvertedLiveLogIds.add(getLogId(log));
+        try {
+            await createAlertFromLog(getLogId(log), {
+                title: 'Alert Generated from Live Attack',
+                message: `${log.attackType} alert created after ${similarCount}/${threshold} matching log${threshold === 1 ? '' : 's'}`,
+                meta: `${log.sourceIP} | ${log.targetSystem} | ${log.country}`,
+                systemGenerated: true,
+                source: 'live-stream-auto-threshold'
+            });
+        } catch (error) {
+            console.warn('Auto alert creation failed:', error);
+            autoConvertedLiveLogIds.delete(getLogId(log));
+            autoAlertCorrelationState[key] = lastAlertedCount;
+        }
+    }
+}
+
 function flushLiveLogs() {
     if (!isLiveStreaming || pendingLiveLogs.length === 0) return;
 
     const newLogs = pendingLiveLogs.splice(0);
     persistLiveLogsToBackend(newLogs)
-        .then((savedLogs) => {
+        .then(async (savedLogs) => {
             const logsToMerge = savedLogs.length ? savedLogs : newLogs;
             allLogs = mergeLogs(logsToMerge, allLogs);
             saveStoredLogs();
@@ -927,23 +1135,7 @@ function flushLiveLogs() {
                 });
             }
 
-            const convertibleLog = logsToMerge.find(log =>
-                ['critical', 'high'].includes(log.severity) &&
-                !log.isBlocked &&
-                !autoConvertedLiveLogIds.has(getLogId(log))
-            );
-
-            if (convertibleLog) {
-                autoConvertedLiveLogIds.add(getLogId(convertibleLog));
-                createAlertFromLog(getLogId(convertibleLog), {
-                    title: 'Alert Generated from Live Attack',
-                    message: `${convertibleLog.severity.toUpperCase()} ${convertibleLog.attackType} promoted to alert`,
-                    meta: `${convertibleLog.sourceIP} | ${convertibleLog.targetSystem} | ${convertibleLog.country}`
-                }).catch(error => {
-                    console.warn('Auto alert creation failed:', error);
-                    autoConvertedLiveLogIds.delete(getLogId(convertibleLog));
-                });
-            }
+            await maybePromoteLiveLogToAlert(logsToMerge);
         })
         .catch((error) => {
             console.warn('Live log sync failed, keeping local copy only:', error);
@@ -960,7 +1152,17 @@ function buildLiveDescription(attackType, targetSystem) {
         'SQL Injection': `SQL payload detected in request targeting ${targetSystem}`,
         'Port Scan': `Sequential port probe detected against ${targetSystem}`,
         'Brute Force': `Repeated authentication attempts detected on ${targetSystem}`,
-        'DDoS': `Traffic burst consistent with DDoS detected against ${targetSystem}`
+        'DDoS': `Traffic burst consistent with DDoS detected against ${targetSystem}`,
+        'Phishing': `Phishing lure and credential capture attempt detected against ${targetSystem}`,
+        'Credential Stuffing': `Credential stuffing attempts detected against ${targetSystem}`,
+        'Password Spraying': `Password spraying pattern detected against ${targetSystem}`,
+        'Malware': `Malware execution signal detected on ${targetSystem}`,
+        'PowerShell Abuse': `Suspicious PowerShell command execution detected on ${targetSystem}`,
+        'Ransomware': `File encryption activity consistent with ransomware detected on ${targetSystem}`,
+        'Microsoft Outlook Exploit': `Suspicious Outlook calendar invite exploit attempt detected against ${targetSystem}`,
+        'Apache Struts Exploit': `Apache Struts OGNL payload exploit attempt detected against ${targetSystem}`,
+        'Exchange Server Exploit': `Exchange Server exploitation pattern detected against ${targetSystem}`,
+        'Log4Shell Exploit': `Log4Shell JNDI lookup exploit attempt detected against ${targetSystem}`
     };
 
     return descriptions[attackType] || `Suspicious activity detected against ${targetSystem}`;
@@ -968,71 +1170,33 @@ function buildLiveDescription(attackType, targetSystem) {
 
 // Log Selection Functions
 function toggleLogSelection(logId) {
-    if (!canManageLogs()) return;
-
-    const id = String(logId);
-    if (selectedLogs.has(id)) {
-        selectedLogs.delete(id);
-    } else {
-        selectedLogs.add(id);
-    }
-    
+    selectedLogs.clear();
     updateSelectedCount();
 }
 
 function selectAllLogs() {
-    if (!canManageLogs()) return;
-
-    const selectAllElement = document.getElementById('select-all');
-    const selectAll = Boolean(selectAllElement?.checked);
-    const checkboxes = document.querySelectorAll('.log-checkbox');
-    
-    if (selectAll) {
-        currentLogs.forEach(log => selectedLogs.add(getLogId(log)));
-        checkboxes.forEach(cb => cb.checked = true);
-    } else {
-        currentLogs.forEach(log => selectedLogs.delete(getLogId(log)));
-        checkboxes.forEach(cb => cb.checked = false);
-    }
-    
+    selectedLogs.clear();
+    syncSelectionColumnVisibility();
     updateSelectedCount();
 }
 
 function updateSelectedCount() {
-    if (!canManageLogs()) {
-        selectedLogs.clear();
-    }
-
-    ensureSelectedDeleteButton();
-
-    const count = selectedLogs.size;
+    selectedLogs.clear();
     const bulkActions = document.getElementById('bulk-actions');
     const selectedCount = document.getElementById('selected-count');
     const selectedDeleteButton = document.getElementById('selected-delete-btn');
-    const selectedDeleteCount = selectedDeleteButton?.querySelector('.selected-delete-count');
     
     if (selectedCount) {
-        selectedCount.textContent = count;
+        selectedCount.textContent = '0';
     }
 
     if (selectedDeleteButton) {
-        const shouldShow = canManageLogs() && count > 0;
-        selectedDeleteButton.style.display = shouldShow ? 'inline-flex' : 'none';
-        selectedDeleteButton.title = count > 0
-            ? `Delete ${count} selected log${count === 1 ? '' : 's'}`
-            : 'Delete selected logs';
-        if (selectedDeleteCount) {
-            selectedDeleteCount.textContent = count;
-        }
+        selectedDeleteButton.remove();
     }
     
     if (!bulkActions) return;
 
-    if (canManageLogs() && count > 0) {
-        bulkActions.style.display = 'block';
-    } else {
-        bulkActions.style.display = 'none';
-    }
+    bulkActions.style.display = 'none';
 }
 
 function clearSelection() {
@@ -1076,6 +1240,10 @@ function viewLogDetail(logId) {
                           style="background: ${getSeverityColor(log.severity)}">
                         ${escapeHtml(log.severity.toUpperCase())}
                     </span>
+                </div>
+                <div class="log-detail-item">
+                    <span class="log-detail-label">MITRE:</span>
+                    ${escapeHtml(log.mitreTechnique || getThreatContextForAttack(log.attackType).mitre)}
                 </div>
             </div>
             
@@ -1362,10 +1530,13 @@ function storeLocalIncident(incident) {
 }
 
 function buildIncidentFromLog(log) {
+    const relatedCves = getRelatedCves(log);
+    const mitreTechnique = log.mitreTechnique || getThreatContextForAttack(log.attackType).mitre;
+    const cveText = relatedCves.length ? `\nRelated CVEs: ${relatedCves.join(', ')}` : '';
     return {
         id: `local-${Date.now()}-${log.id}`,
         title: `Incident: ${log.attackType} from ${log.sourceIP}`,
-        description: `${log.description}\n\nSource IP: ${log.sourceIP}\nTarget: ${log.targetSystem}\nProtocol: ${log.protocol}\nPort: ${log.port}\nBlocked: ${log.isBlocked ? 'Yes' : 'No'}`,
+        description: `${log.description}\n\nSource IP: ${log.sourceIP}\nTarget: ${log.targetSystem}\nProtocol: ${log.protocol}\nPort: ${log.port}\nBlocked: ${log.isBlocked ? 'Yes' : 'No'}\nMITRE: ${mitreTechnique}${cveText}`,
         severity: log.severity,
         status: 'open',
         assignedTo: null,
@@ -1373,6 +1544,10 @@ function buildIncidentFromLog(log) {
         logs: [log.id],
         sourceIP: log.sourceIP,
         affectedSystems: [log.targetSystem],
+        relatedCves,
+        threatIntel: {
+            mitreTechnique
+        },
         tags: ['from-log', log.attackType.toLowerCase().replace(/\s+/g, '-')]
     };
 }
@@ -1386,6 +1561,10 @@ async function persistIncident(incident) {
         status: incident.status,
         sourceIP: incident.sourceIP && incident.sourceIP !== 'Multiple' ? incident.sourceIP : undefined,
         affectedSystems: incident.affectedSystems || [],
+        relatedCves: incident.relatedCves || getRelatedCves(incident),
+        threatIntel: incident.threatIntel || {
+            mitreTechnique: incident.mitreTechnique || getThreatContextForAttack(incident.title || incident.description).mitre
+        },
         tags: incident.tags || [],
         category: 'other',
         priority: incident.severity,
@@ -1437,6 +1616,7 @@ function buildAlertFromLog(log) {
         sourceIP: log.sourceIP,
         targetSystem: log.targetSystem,
         attackType: log.attackType,
+        mitreTechnique: log.mitreTechnique || getThreatContextForAttack(log.attackType).mitre,
         ruleId: 'manual_log_promotion',
         correlationKey: `manual-log-alert:${logId}`,
         evidence: {
@@ -1449,7 +1629,8 @@ function buildAlertFromLog(log) {
         },
         metadata: {
             source: 'security-log-action',
-            promotedFromLog: true
+            promotedFromLog: true,
+            systemGenerated: false
         },
         tags: ['from-log', 'manual-alert', String(log.attackType || 'threat').toLowerCase().replace(/\s+/g, '-')]
     };
@@ -1533,17 +1714,60 @@ async function getIncidentThresholdSetting() {
         });
         const data = await response.json();
         if (!response.ok || !data.success) throw new Error(data.message || 'Settings unavailable');
-        return Math.max(1, Number(data.settings?.incidentConfig?.createIncidentAfter) || 3);
+        return Math.max(1, Number(data.settings?.incidentConfig?.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD);
     } catch (error) {
         console.warn('Incident threshold fallback:', error);
-        return 3;
+        return DEFAULT_INCIDENT_THRESHOLD;
     }
 }
 
 function alertsAreSimilar(alert, candidate) {
     if (!candidate) return false;
     if (alert.ruleId && candidate.ruleId && alert.ruleId !== candidate.ruleId) return false;
-    return String(alert.attackType || '').toLowerCase() === String(candidate.attackType || '').toLowerCase();
+    if (String(alert.attackType || '').toLowerCase() !== String(candidate.attackType || '').toLowerCase()) return false;
+    const scope = getAlertCorrelationScope(alert);
+    if (!scope.field || !scope.value) return true;
+    return String(candidate[scope.field] || '').trim() === scope.value;
+}
+
+function getAlertCorrelationScope(alert = {}) {
+    const attackType = String(alert.attackType || alert.title || '').toLowerCase();
+    const targetSystem = String(alert.targetSystem || '').trim();
+    const sourceIP = String(alert.sourceIP || '').trim();
+    const targetScopedAttacks = [
+        'sql injection',
+        'xss',
+        'cross-site scripting',
+        'ddos',
+        'microsoft outlook exploit',
+        'outlook exploit',
+        'apache struts exploit',
+        'exchange server exploit',
+        'log4shell exploit',
+        'log4j exploit'
+    ];
+    const sourceScopedAttacks = ['brute force', 'port scan', 'credential stuffing', 'password spraying'];
+
+    if (targetScopedAttacks.some(type => attackType.includes(type)) && targetSystem) {
+        return {
+            field: 'targetSystem',
+            value: targetSystem,
+            label: attackType.includes('xss') || attackType.includes('cross-site scripting') ? 'web application/endpoint'
+                : attackType.includes('sql') ? 'API/endpoint'
+                    : attackType.includes('outlook') ? 'mail server'
+                        : attackType.includes('struts') ? 'web server'
+                            : attackType.includes('exchange') ? 'Exchange server'
+                                : 'target server/service'
+        };
+    }
+
+    if (sourceScopedAttacks.some(type => attackType.includes(type)) && sourceIP) {
+        return { field: 'sourceIP', value: sourceIP, label: 'source IP' };
+    }
+
+    if (targetSystem) return { field: 'targetSystem', value: targetSystem, label: 'target system' };
+    if (sourceIP) return { field: 'sourceIP', value: sourceIP, label: 'source IP' };
+    return { field: null, value: '', label: 'source or target' };
 }
 
 function normalizeIncidentSeverity(severity) {
@@ -1572,21 +1796,34 @@ async function createIncidentFromAlertFallback(alert, similarAlerts, threshold) 
             ? 'high'
             : normalizeIncidentSeverity(alert.severity);
     const singleSource = sourceIPs.length === 1 ? sourceIPs[0] : undefined;
+    const relatedCves = [...new Set(similarAlerts.flatMap(getRelatedCves))];
+    const cveLines = relatedCves.length ? [`Related CVEs: ${relatedCves.join(', ')}`] : [];
+    const mitreTechnique = alert.mitreTechnique || getThreatContextForAttack(alert.attackType || alert.title).mitre;
+    const scope = getAlertCorrelationScope(alert);
+    const scopeText = scope.value ? `${scope.label} ${scope.value}` : 'matched source/target';
     const incident = {
-        title: `Repeated ${alert.attackType || alert.ruleId || 'security'} alerts${singleSource ? ` from ${singleSource}` : ''}`,
+        title: `Repeated ${alert.attackType || alert.ruleId || 'security'} alerts for ${scopeText}`,
         description: [
             `${similarAlerts.length} similar alerts reached the incident threshold (${threshold}).`,
             '',
             `Attack Type: ${alert.attackType || 'Unknown'}`,
             `Rule: ${alert.ruleId || 'N/A'}`,
-            `Source IPs: ${sourceIPs.join(', ') || 'Unknown'}`
+            `Correlation: same ${scope.label}${scope.value ? ` (${scope.value})` : ''}`,
+            `MITRE: ${mitreTechnique}`,
+            ...cveLines,
+            `Source IPs: ${sourceIPs.join(', ') || 'Unknown'}`,
+            `Affected Systems: ${affectedSystems.join(', ') || 'Unknown'}`
         ].join('\n'),
         severity: highestSeverity,
         status: 'open',
         category: incidentCategoryFromAttack(alert.attackType),
         sourceIP: singleSource,
         affectedSystems,
+        relatedCves,
         relatedLogs,
+        threatIntel: {
+            mitreTechnique
+        },
         impact: highestSeverity,
         priority: highestSeverity,
         tags: ['auto-alert-correlation', 'frontend-fallback', String(alert.attackType || 'alert').toLowerCase().replace(/\s+/g, '-')]
@@ -1659,6 +1896,14 @@ async function createAlertFromLog(logId, options = {}) {
     if (!log) return;
 
     const alert = buildAlertFromLog(log);
+    if (options.systemGenerated) {
+        alert.metadata = {
+            ...(alert.metadata || {}),
+            source: options.source || 'system-auto-threshold',
+            systemGenerated: true
+        };
+        alert.tags = [...new Set([...(alert.tags || []), 'system-generated'])];
+    }
 
     try {
         let result = await persistAlert(alert);
@@ -1678,7 +1923,7 @@ async function createAlertFromLog(logId, options = {}) {
                 meta: options.meta || `${log.attackType} | ${log.sourceIP}`
             });
             if (result.incident) {
-                showNotification(`Incident auto-created: threshold ${result.incidentThreshold || 3} reached`, 'success', {
+                showNotification(`Incident auto-created: threshold ${result.incidentThreshold || DEFAULT_INCIDENT_THRESHOLD} reached`, 'success', {
                     title: result.incidentCreated ? 'Incident Auto-Created' : 'Incident Auto-Updated',
                     meta: result.incident?.title || `${log.attackType} | ${log.sourceIP}`
                 });
@@ -1719,7 +1964,6 @@ async function createAlertFromSelected() {
     const highestSeverity = ['critical', 'high', 'medium', 'low'].find(level =>
         selectedLogData.some(log => log.severity === level)
     ) || 'medium';
-
     const alert = {
         title: `Bulk Alert: ${selectedLogIds.length} related logs`,
         description: `Created from ${selectedLogIds.length} selected security logs.\n\nSources: ${selectedLogData.map(log => log.sourceIP).join(', ')}`,
@@ -1759,7 +2003,7 @@ async function createAlertFromSelected() {
             meta: `${selectedLogIds.length} logs attached`
         });
         if (result.incident) {
-            showNotification(`Incident auto-created: threshold ${result.incidentThreshold || 3} reached`, 'success', {
+            showNotification(`Incident auto-created: threshold ${result.incidentThreshold || DEFAULT_INCIDENT_THRESHOLD} reached`, 'success', {
                 title: result.incidentCreated ? 'Incident Auto-Created' : 'Incident Auto-Updated',
                 meta: result.incident?.title || 'Correlated alert incident'
             });
@@ -1867,63 +2111,55 @@ function exportSingleLog(logId) {
 
 // Clear Logs
 function clearLogs() {
-    if (!canManageLogs()) {
-        showNotification('Only admins can clear logs.', 'error');
-        return;
-    }
-
-    if (confirm('Are you sure you want to clear all logs? This action cannot be undone.')) {
-        allLogs = [];
-        filteredLogs = [];
-        selectedLogs.clear();
-        currentPage = 1;
-        saveStoredLogs();
-        loadLogsForPage();
-        updateLogStats();
-        
-        showNotification('Logs cleared', 'info');
-    }
+    showNotification('Log deletion is disabled for audit integrity.', 'info');
 }
 
 // Delete Selected Logs
 async function deleteSelectedLogs() {
+    selectedLogs.clear();
+    syncSelectionColumnVisibility();
+    updateSelectedCount();
+    showNotification('Log deletion is disabled for audit integrity.', 'info');
+}
+
+async function archiveLog(logId) {
     if (!canManageLogs()) {
-        showNotification('Only admins can delete logs.', 'error');
+        showNotification('Only admins can archive logs.', 'error');
         return;
     }
 
-    if (selectedLogs.size === 0) {
-        alert('No logs selected for deletion');
-        return;
-    }
-    
-    if (confirm(`Are you sure you want to delete ${selectedLogs.size} selected logs?`)) {
-        const idsToDelete = Array.from(selectedLogs).map(String);
-        const backendIds = idsToDelete.filter(isBackendLogId);
+    const log = allLogs.find(item => getLogId(item) === String(logId));
+    if (!log) return;
+    if (!confirm('Archive this log from the active Security Logs view?')) return;
 
-        try {
-            if (backendIds.length) {
-                await deleteLogsFromBackend(backendIds);
-            }
-
-            rememberDeletedLogIds(idsToDelete);
-            allLogs = allLogs.filter(log => !idsToDelete.includes(getLogId(log)));
-            filteredLogs = filteredLogs.filter(log => !idsToDelete.includes(getLogId(log)));
-            const deletedCount = idsToDelete.length;
-            saveStoredLogs();
-
-            clearSelection();
-            loadLogsForPage();
-            updateLogStats();
-            refreshLogsFromApi();
-
-            showNotification(`${deletedCount} logs deleted`, 'success');
-        } catch (error) {
-            console.error('Delete selected logs failed:', error);
-            showNotification(error.message || 'Could not delete selected logs from server.', 'error', {
-                title: 'Delete Failed'
+    const id = getLogId(log);
+    try {
+        if (isBackendLogId(id)) {
+            const token = localStorage.getItem('token') || '';
+            const response = await fetch(`${getApiBaseUrl()}/logs/${id}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ archived: true })
             });
+            const payload = await response.json();
+            if (!response.ok || !payload.success) {
+                throw new Error(payload.message || 'Could not archive log');
+            }
         }
+
+        rememberArchivedLog(log);
+        allLogs = allLogs.filter(item => getLogId(item) !== id);
+        filteredLogs = filteredLogs.filter(item => getLogId(item) !== id);
+        saveStoredLogs();
+        loadLogsForPage();
+        updateLogStats();
+        showNotification('Log archived', 'success');
+    } catch (error) {
+        console.error('Archive log failed:', error);
+        showNotification(error.message || 'Could not archive log.', 'error');
     }
 }
 
@@ -2030,3 +2266,4 @@ window.exportLogs = exportLogs;
 window.exportSelectedLogs = exportSelectedLogs;
 window.clearLogs = clearLogs;
 window.deleteSelectedLogs = deleteSelectedLogs;
+window.archiveLog = archiveLog;

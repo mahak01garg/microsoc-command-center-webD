@@ -10,7 +10,7 @@ const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || proce
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
 const AI_REQUIRE_PROVIDER = true;
-const AI_ALLOW_LOCAL_FALLBACK = String(process.env.AI_ALLOW_LOCAL_FALLBACK || 'false').toLowerCase() === 'true';
+const AI_ALLOW_LOCAL_FALLBACK = String(process.env.AI_ALLOW_LOCAL_FALLBACK || 'true').toLowerCase() === 'true';
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 15000);
 const AI_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 450);
 const AI_FORCE_RESPONSE_FORMAT = String(process.env.AI_FORCE_RESPONSE_FORMAT || (!IS_OPENROUTER)).toLowerCase() === 'true';

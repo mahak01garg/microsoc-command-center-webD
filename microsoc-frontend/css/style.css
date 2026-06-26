@@ -138,6 +138,22 @@ body {
     margin-left: auto;
 }
 
+.sidebar-nav .badge,
+.sidebar-nav .nav-badge {
+    display: none !important;
+}
+
+.log-select-header,
+.log-select-cell,
+.log-checkbox,
+#select-all,
+#bulk-actions,
+#selected-delete-btn,
+button[onclick*="clearLogs"],
+button[onclick*="deleteSelectedLogs"] {
+    display: none !important;
+}
+
 /* Header Styles */
 .main-header {
     display: flex;
@@ -235,6 +251,14 @@ body {
     font-size: 24px;
     font-weight: bold;
     margin-bottom: 5px;
+}
+
+.stat-detail {
+    margin: -1px 0 6px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
 }
 
 .stat-change {

@@ -1,6 +1,6 @@
 const User = require('../models/User');
 const crypto = require('crypto');
-const { recordAuditEvent } = require('../utils/auditLogger');
+const { recordAuditEvent, pickRequestIp } = require('../utils/auditLogger');
 const {
   sendApprovalRequestEmail,
   sendPasswordResetOtpEmail
@@ -125,10 +125,11 @@ exports.login = async (req, res) => {
 
     // Create token
     const token = user.getSignedJwtToken();
+    const sessionId = `${String(user._id).slice(-8)}-${Date.now().toString(36)}`;
 
     // Update login history
     await user.updateLoginHistory(
-      req.ip,
+      pickRequestIp(req),
       req.headers['user-agent']
     );
 
@@ -157,10 +158,16 @@ exports.login = async (req, res) => {
       action: 'User Logged In',
       module: 'auth',
       targetType: 'Session',
-      targetId: String(user._id),
+      targetId: sessionId,
       targetLabel: user.email,
-      details: `User logged in successfully`,
-      metadata: { loginCount: user.loginCount }
+      details: `Authentication successful. Role: ${user.role}. Access granted.`,
+      metadata: {
+        loginCount: user.loginCount,
+        authenticationMethod: 'Email + Password',
+        role: user.role,
+        sessionId,
+        sessionDuration: 'Not Captured'
+      }
     });
   } catch (error) {
     console.error('❌ Login error:', error);

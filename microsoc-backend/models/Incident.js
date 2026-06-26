@@ -129,6 +129,11 @@ const IncidentSchema = new mongoose.Schema({
     type: String,
     maxlength: [50, 'Tag cannot be more than 50 characters']
   }],
+  relatedCves: [{
+    type: String,
+    trim: true,
+    maxlength: [32, 'CVE value cannot be more than 32 characters']
+  }],
   closedAt: Date,
   closedBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -159,6 +164,16 @@ const IncidentSchema = new mongoose.Schema({
       type: String,
       default: 'Investigate'
     }
+  },
+  archived: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  archivedAt: Date,
+  archivedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
   }
 },
 {
@@ -172,6 +187,7 @@ IncidentSchema.index({ severity: 1 });
 IncidentSchema.index({ assignedTo: 1 });
 IncidentSchema.index({ createdBy: 1 });
 IncidentSchema.index({ createdAt: -1 });
+IncidentSchema.index({ archived: 1 });
 
 // Pre-save middleware to update SLA deadlines
 IncidentSchema.pre('save', function(next) {
@@ -218,6 +234,11 @@ IncidentSchema.methods.updateStatus = async function(newStatus, user, note) {
 // Static method to get incident statistics
 IncidentSchema.statics.getStatistics = async function() {
   const stats = await this.aggregate([
+    {
+      $match: {
+        archived: { $ne: true }
+      }
+    },
     {
       $facet: {
         statusCounts: [

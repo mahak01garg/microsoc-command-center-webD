@@ -22,9 +22,16 @@ const LogSchema = new mongoose.Schema({
       'Zero-Day',
       'MITM',
       'Credential Theft',
+      'Credential Stuffing',
+      'Password Spraying',
       'Data Exfiltration',
+      'PowerShell Abuse',
       'IoT Attack',
       'Supply Chain',
+      'Microsoft Outlook Exploit',
+      'Apache Struts Exploit',
+      'Exchange Server Exploit',
+      'Log4Shell Exploit',
       'Other'
     ]
   },
@@ -104,7 +111,17 @@ const LogSchema = new mongoose.Schema({
       type: Date,
       default: Date.now
     }
-  }]
+  }],
+  archived: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  archivedAt: Date,
+  archivedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }
 }, {
   timestamps: true
 });
@@ -142,7 +159,13 @@ LogSchema.statics.getStatistics = async function(timeRange = '24h') {
       startDate = new Date(now.getTime() - (24 * 60 * 60 * 1000));
   }
   
-  const pipeline = [];
+  const pipeline = [
+    {
+      $match: {
+        archived: { $ne: true }
+      }
+    }
+  ];
 
   if (startDate) {
     pipeline.push({

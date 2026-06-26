@@ -159,6 +159,9 @@ AlertSchema.statics.getStatistics = async function(timeRange = '24h') {
   let startDate;
 
   switch (timeRange) {
+    case 'all':
+      startDate = null;
+      break;
     case '1h':
       startDate = new Date(now.getTime() - (60 * 60 * 1000));
       break;

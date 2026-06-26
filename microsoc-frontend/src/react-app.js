@@ -181,6 +181,7 @@
         scheduleSidebarRepair(document.getElementById('legacy-page') || document);
         installAIAssistant(route);
         syncUserManagementPanel(route);
+        ensureDefenseBanner(mainContent, route);
         if (route === 'audit-logs') return;
         if (document.querySelector('.threat-ribbon')) return;
 
@@ -240,40 +241,9 @@
         renderButton();
     }
 
-    function installRouteTabs(mainContent, route) {
-        if (!mainContent || document.querySelector('.soc-route-tabs')) return;
-
-        const tabs = document.createElement('div');
-        tabs.className = 'soc-route-tabs';
-        const role = currentUser().role || 'analyst';
-        const links = [
-            ['dashboard', 'Dashboard'],
-            ['logs', 'Security Logs'],
-            ['alerts', 'Alerts'],
-            ['incidents', 'Incidents'],
-            ['analytics', 'Analytics']
-        ];
-        if (role === 'admin') {
-            links.push(
-                ['user-management', 'User Management'],
-                ['audit-logs', 'Audit Logs'],
-                ['settings', 'Settings']
-            );
-        }
-
-        tabs.innerHTML = links.map(([tabRoute, label]) => `
-            <button type="button" class="soc-route-tab ${route === tabRoute ? 'active' : ''}" data-route="${tabRoute}">
-                ${label}
-            </button>
-        `).join('');
-
-        tabs.addEventListener('click', (event) => {
-            const button = event.target.closest('[data-route]');
-            if (!button) return;
-            navigateTo(button.dataset.route);
-        });
-
-        mainContent.insertBefore(tabs, mainContent.firstChild);
+    function installRouteTabs(mainContent) {
+        mainContent?.querySelectorAll('.soc-route-tabs').forEach(tabs => tabs.remove());
+        document.querySelectorAll('.soc-route-tabs').forEach(tabs => tabs.remove());
     }
 
     function ensureAlertsSidebarLink(route) {
@@ -613,6 +583,31 @@
         };
     }
 
+    function ensureDefenseBanner(mainContent, route) {
+        if (!mainContent) return;
+
+        const panel = document.getElementById('user-management-panel');
+        const host = panel || mainContent;
+        let banner = host.querySelector('.defense-banner') || mainContent.querySelector('.defense-banner');
+
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.className = 'defense-banner';
+            banner.setAttribute('aria-hidden', 'true');
+            banner.textContent = 'LIVE DEFENSE GRID  //  INTRUSION MONITORING ACTIVE  //  ZERO TRUST WATCH';
+        }
+
+        const anchor = panel
+            ? host.querySelector('.feature-panel-header')
+            : host.querySelector('.main-header');
+
+        if (anchor) {
+            anchor.insertAdjacentElement('afterend', banner);
+        } else {
+            host.insertBefore(banner, host.firstChild);
+        }
+    }
+
     function syncUserManagementPanel(route) {
         const panel = document.getElementById('user-management-panel');
         if (route === 'user-management') {
@@ -686,14 +681,6 @@
                     ${role === 'admin' ? '<span><i class="fas fa-lock-open"></i> Admin controls enabled</span>' : '<span><i class="fas fa-lock"></i> Admin controls hidden</span>'}
                 </div>
             </div>
-            <div class="soc-route-tabs">
-                <button type="button" class="soc-route-tab" data-route="dashboard">Dashboard</button>
-                <button type="button" class="soc-route-tab" data-route="logs">Security Logs</button>
-                <button type="button" class="soc-route-tab" data-route="alerts">Alerts</button>
-                <button type="button" class="soc-route-tab" data-route="incidents">Incidents</button>
-                <button type="button" class="soc-route-tab" data-route="analytics">Analytics</button>
-                <button type="button" class="soc-route-tab active" data-route="user-management">User Management</button>
-            </div>
             <div class="feature-panel-header">
                 <div>
                     <h2 style="font-size:26px;font-weight:900;line-height:1.1;"><i class="fas fa-users-cog"></i> User Management</h2>
@@ -732,11 +719,6 @@
             </div>
         `;
         host.insertAdjacentElement('afterbegin', panel);
-        panel.querySelector('.soc-route-tabs')?.addEventListener('click', (event) => {
-            const button = event.target.closest('[data-route]');
-            if (!button) return;
-            navigateTo(button.dataset.route);
-        });
         setExclusiveMainContentView(panel);
         panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
         return panel;
@@ -1040,12 +1022,22 @@
     async function getNotificationItems() {
         try {
             const payload = await apiRequest('/alerts/recent?limit=10');
+            const formatNotificationTime = (value) => {
+                const date = new Date(value);
+                if (Number.isNaN(date.getTime())) return 'Time unavailable';
+                return date.toLocaleString([], {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
+            };
             return (payload.alerts || []).map((alert) => ({
                 type: alert.severity === 'critical' ? 'critical' : alert.severity === 'high' ? 'warning' : 'info',
                 icon: alert.severity === 'critical' ? 'fa-exclamation-circle' : alert.severity === 'high' ? 'fa-exclamation-triangle' : 'fa-info-circle',
                 title: alert.title,
                 message: alert.description || alert.source || 'Security alert',
-                time: new Date(alert.timestamp || Date.now()).toLocaleString()
+                time: formatNotificationTime(alert.createdAt || alert.firstSeen || alert.lastSeen || alert.log?.timestamp || alert.updatedAt)
             }));
         } catch (error) {
             console.error('Notifications failed:', error);
@@ -1381,6 +1373,63 @@
         return String(currentUser().role || 'analyst').trim().toLowerCase() === 'admin';
     }
 
+    function escapeInline(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function getThreatContextForAttack(attackType) {
+        const key = String(attackType || '').toLowerCase();
+        const contexts = [
+            { match: ['microsoft outlook exploit', 'outlook exploit', 'outlook elevation'], cves: ['CVE-2023-23397'], mitre: 'T1203 - Exploitation for Client Execution' },
+            { match: ['apache struts exploit', 'struts exploit'], cves: ['CVE-2017-5638'], mitre: 'T1190 - Exploit Public-Facing Application' },
+            { match: ['exchange server exploit', 'exchange exploit', 'proxylogon', 'proxyshell'], cves: ['CVE-2021-26855', 'CVE-2021-34473'], mitre: 'T1190 - Exploit Public-Facing Application' },
+            { match: ['log4shell exploit', 'log4j exploit', 'log4shell'], cves: ['CVE-2021-44228'], mitre: 'T1190 - Exploit Public-Facing Application' },
+            { match: ['sql injection', 'sqli'], cves: [], mitre: 'T1190 - Exploit Public-Facing Application' },
+            { match: ['xss', 'cross-site scripting'], cves: [], mitre: 'T1190 - Exploit Public-Facing Application' },
+            { match: ['password spraying', 'password spray'], cves: [], mitre: 'T1110.003 - Password Spraying' },
+            { match: ['brute force', 'credential stuffing', 'credential'], cves: [], mitre: 'T1110 - Brute Force' },
+            { match: ['ddos', 'dos'], cves: [], mitre: 'T1499 - Endpoint Denial of Service' },
+            { match: ['port scan', 'scan'], cves: [], mitre: 'T1046 - Network Service Discovery' },
+            { match: ['phishing', 'phish'], cves: [], mitre: 'T1566 - Phishing' },
+            { match: ['malware'], cves: [], mitre: 'T1204 - User Execution' },
+            { match: ['powershell abuse', 'powershell'], cves: [], mitre: 'T1059.001 - PowerShell' },
+            { match: ['ransomware'], cves: [], mitre: 'T1486 - Data Encrypted for Impact' }
+        ];
+        return contexts.find(context => context.match.some(value => key.includes(value))) || {
+            cves: [],
+            mitre: 'T1190 - Exploit Public-Facing Application'
+        };
+    }
+
+    function getRelatedCves(item = {}) {
+        const existing = item.relatedCves || item.cves || item.evidence?.relatedCves || item.metadata?.relatedCves;
+        if (Array.isArray(existing) && existing.length) return existing;
+        return getThreatContextForAttack(item.attackType || item.title || item.description).cves;
+    }
+
+    function renderCveBadges(item = {}) {
+        return getRelatedCves(item).map(cve => `<span class="badge badge-info">${escapeInline(cve)}</span>`).join('');
+    }
+
+    function getMitreForItem(item = {}) {
+        const candidates = [
+            item.mitreTechnique,
+            item.threatIntel?.mitreTechnique,
+            item.evidence?.mitreTechnique,
+            item.metadata?.mitreTechnique
+        ];
+        const stored = candidates.find(value => {
+            const text = String(value || '').trim();
+            return text && !/^unknown$/i.test(text) && !/^mitre unknown$/i.test(text);
+        });
+        return stored || getThreatContextForAttack(item.attackType || item.title || item.description).mitre;
+    }
+
     function applyRoleRestrictions(root) {
         const role = String(currentUser().role || 'analyst').trim().toLowerCase();
         root.dataset.userRole = role;
@@ -1530,6 +1579,11 @@
         let workbench;
         let refreshButton;
         let activeInvestigationAlert = null;
+        let currentAlerts = [];
+        let currentAlertsPage = 1;
+        let currentAlertsTotal = 0;
+        let currentAlertsTotalPages = 1;
+        const alertsPageSize = 50;
 
         if (panel) {
             panel.className = 'feature-panel feature-alerts-console';
@@ -1674,10 +1728,10 @@
                         <p class="investigation-kicker">Alert Investigation</p>
                         <h3>${escapeHtml(alert.title || 'Security Alert')}</h3>
                         <div class="investigation-badges">
-                            <span class="investigation-severity ${escapeHtml(alert.severity || 'medium')}">${escapeHtml(String(alert.severity || 'medium').toUpperCase())}</span>
-                            <span>${escapeHtml(formatStatus(alert.status))}</span>
-                            <span>${escapeHtml(alert.mitreTechnique || 'MITRE unknown')}</span>
-                        </div>
+	                            <span class="investigation-severity ${escapeHtml(alert.severity || 'medium')}">${escapeHtml(String(alert.severity || 'medium').toUpperCase())}</span>
+	                            <span>${escapeHtml(formatStatus(alert.status))}</span>
+	                            <span>${escapeHtml(getMitreForItem(alert))}</span>
+	                        </div>
                     </div>
                     <button type="button" class="investigation-close" data-close-investigation aria-label="Close investigation">&times;</button>
                 </header>
@@ -1689,9 +1743,9 @@
                         <div class="investigation-facts">
                             <span><strong>Source</strong>${escapeHtml(alert.sourceIP || 'Unknown')}</span>
                             <span><strong>Target</strong>${escapeHtml(alert.targetSystem || 'Unknown')}</span>
-                            <span><strong>Attack</strong>${escapeHtml(alert.attackType || 'Threat')}</span>
-                            <span><strong>Hits</strong>${escapeHtml(alert.occurrenceCount || 1)}</span>
-                        </div>
+	                            <span><strong>Attack</strong>${escapeHtml(alert.attackType || 'Threat')}</span>
+	                            <span><strong>Hits</strong>${escapeHtml(alert.occurrenceCount || 1)}</span>
+	                        </div>
                     </section>
 
                     <section class="investigation-card">
@@ -1789,7 +1843,7 @@
                         })
                     });
                     selected = payload.alert || selected;
-                    await loadAlerts();
+                    await loadAlerts({ page: 1 });
                 }
 
                 const relatedLogs = await loadRelatedLogsForAlert(selected);
@@ -1884,13 +1938,23 @@
             `).join('');
         }
 
-        function renderAlerts(alerts = []) {
+        function renderAlerts(alerts = [], pagination = {}) {
             if (!alerts.length) {
                 workbench.innerHTML = '<p class="empty-state">No alerts found for the selected window.</p>';
                 return;
             }
 
-            workbench.innerHTML = alerts.map(alert => `
+            const total = Number(pagination.total ?? currentAlertsTotal ?? alerts.length);
+            const page = Number(pagination.page ?? currentAlertsPage ?? 1);
+            const totalPages = Number(pagination.totalPages ?? currentAlertsTotalPages ?? 1);
+            const canLoadMore = page < totalPages && alerts.length < total;
+
+            workbench.innerHTML = `
+                <div class="alerts-list-status">
+                    <span>Showing <strong>${escapeHtml(alerts.length)}</strong> of <strong>${escapeHtml(total)}</strong> active alerts</span>
+                    <span>Page ${escapeHtml(page)} / ${escapeHtml(totalPages)}</span>
+                </div>
+                ${alerts.map(alert => `
                 <article class="alert-ticket ${escapeHtml(alert.severity || 'medium')}">
                     <div class="alert-ticket-main">
                         <div class="alert-ticket-header">
@@ -1898,12 +1962,12 @@
                             <span>${escapeHtml(formatStatus(alert.status))}</span>
                         </div>
                         <p>${escapeHtml(alert.description || 'No description available.')}</p>
-                        <div class="alert-meta">
-                            <span><i class="fas fa-shield-virus"></i> ${escapeHtml(alert.attackType || 'Threat')}</span>
-                            <span><i class="fas fa-network-wired"></i> ${escapeHtml(alert.sourceIP || 'Unknown')}</span>
-                            <span><i class="fas fa-fingerprint"></i> ${escapeHtml(alert.mitreTechnique || 'Unknown')}</span>
-                            <span><i class="fas fa-copy"></i> ${escapeHtml(alert.occurrenceCount || 1)} hits</span>
-                        </div>
+	                        <div class="alert-meta">
+	                            <span><i class="fas fa-shield-virus"></i> ${escapeHtml(alert.attackType || 'Threat')}</span>
+	                            <span><i class="fas fa-network-wired"></i> ${escapeHtml(alert.sourceIP || 'Unknown')}</span>
+	                            <span><i class="fas fa-fingerprint"></i> ${escapeHtml(getMitreForItem(alert))}</span>
+	                            <span><i class="fas fa-copy"></i> ${escapeHtml(alert.occurrenceCount || 1)} hits</span>
+	                        </div>
                     </div>
                     <div class="ticket-actions">
                         <button type="button" data-alert-view="${escapeHtml(alertId(alert))}">View</button>
@@ -1913,20 +1977,40 @@
                             : '<button type="button" data-alert-escalate>Escalate</button>'}
                     </div>
                 </article>
-            `).join('');
+                `).join('')}
+                ${canLoadMore ? `
+                    <div class="alerts-load-more-row">
+                        <button type="button" class="btn btn-outline" data-alert-load-more>
+                            <i class="fas fa-chevron-down"></i> Load More Alerts
+                        </button>
+                    </div>
+                ` : ''}
+            `;
         }
 
-        async function loadAlerts() {
+        async function loadAlerts(options = {}) {
+            const page = Math.max(1, Number(options.page || 1));
+            const append = Boolean(options.append);
             const [alertsPayload, statsPayload] = await Promise.all([
-                apiRequest('/alerts/recent?limit=25'),
-                apiRequest('/alerts/stats?timeRange=24h')
+                apiRequest(`/alerts/recent?limit=${alertsPageSize}&page=${page}&timeRange=all`),
+                apiRequest('/alerts/stats?timeRange=all')
             ]);
+            currentAlerts = append
+                ? [...currentAlerts, ...(alertsPayload.alerts || [])]
+                : (alertsPayload.alerts || []);
+            currentAlertsPage = Number(alertsPayload.page || page);
+            currentAlertsTotal = Number(alertsPayload.total || currentAlerts.length);
+            currentAlertsTotalPages = Number(alertsPayload.totalPages || 1);
             renderSummary(statsPayload.stats || alertsPayload.stats || {});
-            renderAlerts(alertsPayload.alerts || []);
+            renderAlerts(currentAlerts, {
+                total: currentAlertsTotal,
+                page: currentAlertsPage,
+                totalPages: currentAlertsTotalPages
+            });
         }
 
         refreshButton?.addEventListener('click', () => {
-            loadAlerts().catch(error => {
+            loadAlerts({ page: 1 }).catch(error => {
                 workbench.innerHTML = `<p class="empty-state">${error.message}</p>`;
             });
         });
@@ -1937,6 +2021,14 @@
             const viewButton = event.target.closest('[data-alert-view]');
             const investigateButton = event.target.closest('[data-alert-investigate]');
             const escalateButton = event.target.closest('[data-alert-escalate]');
+            const loadMoreButton = event.target.closest('[data-alert-load-more]');
+
+            if (loadMoreButton) {
+                loadMoreButton.disabled = true;
+                loadMoreButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
+                await loadAlerts({ page: currentAlertsPage + 1, append: true });
+                return;
+            }
 
             if (investigateButton) {
                 await openInvestigation(investigateButton.dataset.alertInvestigate, { markInProgress: true });
@@ -1949,7 +2041,7 @@
                     method: 'PATCH',
                     body: JSON.stringify({ status, note: `Status updated to ${status}` })
                 });
-                await loadAlerts();
+                await loadAlerts({ page: 1 });
             }
 
             if (deleteButton) {
@@ -1958,7 +2050,7 @@
                     method: 'DELETE',
                     body: JSON.stringify({ reason })
                 });
-                    await loadAlerts();
+                    await loadAlerts({ page: 1 });
                 }
 
             if (escalateButton) {
@@ -1986,7 +2078,7 @@
                         notes: [{ text: `Investigation drawer updated status to ${status}.` }]
                     })
                 });
-                await loadAlerts();
+                await loadAlerts({ page: 1 });
                 await openInvestigation(alertId(activeInvestigationAlert));
                 if (typeof window.showNotification === 'function') {
                     window.showNotification(`Alert marked ${formatStatus(status)}`, 'success');
@@ -2010,14 +2102,21 @@
                     ? (selected.log._id || selected.log.id)
                     : selected.log;
                 const isValidSourceIP = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(String(selected.sourceIP || ''));
-                const incidentPayload = {
-                    title: `Alert: ${selected.title || selected.attackType || 'Security investigation'}`,
-                    description: `${selected.description || 'Created from alert investigation.'}\n\nSource: ${selected.sourceIP || 'Unknown'}\nMITRE: ${selected.mitreTechnique || 'Unknown'}\nHits: ${selected.occurrenceCount || 1}`,
-                    severity: ['critical', 'high', 'medium', 'low'].includes(selected.severity) ? selected.severity : 'medium',
-                    status: 'open',
-                    category: 'other',
-                    affectedSystems: [selected.targetSystem].filter(Boolean),
-                    relatedLogs: linkedLogId ? [linkedLogId] : [],
+                const relatedCves = getRelatedCves(selected);
+                const mitreTechnique = getMitreForItem(selected);
+                const cveText = relatedCves.length ? `\nRelated CVEs: ${relatedCves.join(', ')}` : '';
+	                const incidentPayload = {
+	                    title: `Alert: ${selected.title || selected.attackType || 'Security investigation'}`,
+	                    description: `${selected.description || 'Created from alert investigation.'}\n\nSource: ${selected.sourceIP || 'Unknown'}\nMITRE: ${mitreTechnique}${cveText}\nHits: ${selected.occurrenceCount || 1}`,
+	                    severity: ['critical', 'high', 'medium', 'low'].includes(selected.severity) ? selected.severity : 'medium',
+	                    status: 'open',
+	                    category: 'other',
+	                    affectedSystems: [selected.targetSystem].filter(Boolean),
+	                    relatedCves,
+                        threatIntel: {
+                            mitreTechnique
+                        },
+	                    relatedLogs: linkedLogId ? [linkedLogId] : [],
                     impact: ['critical', 'high'].includes(selected.severity) ? 'high' : 'medium',
                     priority: ['critical', 'high'].includes(selected.severity) ? selected.severity : 'medium'
                 };
@@ -2036,7 +2135,7 @@
                         notes: [{ text: `Incident created from investigation: ${payload.incident?.title || 'Incident'}` }]
                     })
                 }).catch(() => null);
-                await loadAlerts();
+                await loadAlerts({ page: 1 });
                 await openInvestigation(alertId(selected));
                 if (typeof window.showNotification === 'function') {
                     window.showNotification('Incident created from alert investigation', 'success');
@@ -2044,7 +2143,7 @@
             }
         });
 
-        loadAlerts().catch(error => {
+        loadAlerts({ page: 1 }).catch(error => {
             workbench.innerHTML = `<p class="empty-state">${error.message}</p>`;
         });
     }
@@ -2089,22 +2188,8 @@
                         ${role === 'admin' ? '<span><i class="fas fa-lock-open"></i> Admin controls enabled</span>' : '<span><i class="fas fa-lock"></i> Admin controls hidden</span>'}
                     </div>
                 </div>
-                <div class="soc-route-tabs">
-                    <button type="button" class="soc-route-tab" data-route="dashboard">Dashboard</button>
-                    <button type="button" class="soc-route-tab" data-route="logs">Security Logs</button>
-                    <button type="button" class="soc-route-tab" data-route="alerts">Alerts</button>
-                    <button type="button" class="soc-route-tab" data-route="incidents">Incidents</button>
-                    <button type="button" class="soc-route-tab" data-route="analytics">Analytics</button>
-                    <button type="button" class="soc-route-tab active" data-route="audit-logs">Audit Logs</button>
-                    ${role === 'admin' ? '<button type="button" class="soc-route-tab" data-route="user-management">User Management</button><button type="button" class="soc-route-tab" data-route="settings">Settings</button>' : ''}
-                </div>
             `;
             host.insertBefore(chrome, host.firstChild);
-            chrome.querySelector('.soc-route-tabs')?.addEventListener('click', (event) => {
-                const button = event.target.closest('[data-route]');
-                if (!button) return;
-                navigateTo(button.dataset.route);
-            });
         }
 
         panel.innerHTML = `
@@ -2175,12 +2260,6 @@
 
         if (!summary || !groups || !searchInput || !timeSelect || !moduleSelect || !resultSelect || !drawer || !drawerBody) return;
 
-        panel.querySelector('.soc-route-tabs')?.addEventListener('click', (event) => {
-            const button = event.target.closest('[data-route]');
-            if (!button) return;
-            navigateTo(button.dataset.route);
-        });
-
         timeSelect.value = 'all';
 
         const roleMeta = {
@@ -2214,6 +2293,40 @@
             return 'other';
         }
 
+        function isSystemAuditEvent(log = {}) {
+            const action = String(log.action || '').toLowerCase();
+            const module = String(log.module || '').toLowerCase();
+            const details = String(log.details || '').toLowerCase();
+            const metadata = log.metadata || {};
+            const source = String(metadata.source || '').toLowerCase();
+            const systemActions = [
+                'settings updated',
+                'policy/config changes',
+                'policy config changes',
+                'auto incident created',
+                'auto incident updated',
+                'security log generated',
+                'bulk logs created',
+                'mock logs generated',
+                'alert auto generated',
+                'status/health event',
+                'status health event'
+            ];
+            const systemSources = ['bulk-live-stream', 'mock-generator', 'live-stream-auto-threshold', 'system-auto-threshold'];
+
+            return systemActions.some(item => action.includes(item))
+                || systemSources.some(item => source.includes(item))
+                || Boolean(metadata.systemGenerated)
+                || (module === 'settings' && action.includes('updated'))
+                || (module === 'logs' && (action.includes('generated') || action.includes('bulk logs created') || details.includes('system ingested')))
+                || (module === 'alerts' && action.includes('auto'))
+                || (module === 'incidents' && action.includes('auto'));
+        }
+
+        function getAuditGroupRole(log = {}) {
+            return isSystemAuditEvent(log) ? 'system' : normalizeRole(log.actorRole);
+        }
+
         function formatDateLabel(value) {
             return new Date(value || Date.now()).toLocaleDateString('en-GB', {
                 day: '2-digit',
@@ -2241,9 +2354,157 @@
             }
         }
 
-        const renderSummary = (stats = {}) => {
-            const totalEvents = stats.totalEvents?.[0]?.count || 0;
-            const byRole = Object.fromEntries((stats.byRole || []).map((item) => [normalizeRole(item._id), item.count]));
+        function auditDisplayValue(value) {
+            if (value === null || value === undefined || value === '' || String(value).toLowerCase() === 'unknown') return 'Not Captured';
+            return String(value);
+        }
+
+        function auditHash(value = '') {
+            return Array.from(String(value || 'audit')).reduce((hash, char) => {
+                return ((hash << 5) - hash + char.charCodeAt(0)) >>> 0;
+            }, 2166136261);
+        }
+
+        function auditSeed(log = {}) {
+            return [
+                log.id,
+                log._id,
+                log.timestamp,
+                log.actorEmail,
+                log.action,
+                log.targetLabel,
+                log.targetId
+            ].filter(Boolean).join('|') || 'microsoc-audit';
+        }
+
+        function mockSessionId(log = {}) {
+            const hash = auditHash(auditSeed(log)).toString(16).padStart(8, '0');
+            const tail = auditHash(`${auditSeed(log)}:session`).toString(36).slice(0, 6).toUpperCase();
+            return `SES-${hash.slice(0, 8)}-${tail}`;
+        }
+
+        function auditLabel(value = '') {
+            return String(value)
+                .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+                .replace(/[_-]+/g, ' ')
+                .replace(/\b\w/g, letter => letter.toUpperCase());
+        }
+
+        function renderAuditFields(fields = []) {
+            const visibleFields = fields.filter(field => field && field.label && auditDisplayValue(field.value) !== 'Not Captured');
+            if (!visibleFields.length) {
+                return '';
+            }
+            return `
+                <div class="audit-kv-list">
+                    ${visibleFields.map(field => `
+                        <div class="audit-kv-row">
+                            <span>${escapeHtml(field.label)}</span>
+                            <strong>${escapeHtml(auditDisplayValue(field.value))}</strong>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        function renderAuditMetadata(metadata = {}) {
+            const entries = Object.entries(metadata || {})
+                .filter(([key, value]) => value !== undefined && value !== null && value !== '' && typeof value !== 'object')
+                .map(([key, value]) => ({ label: auditLabel(key), value }));
+            return renderAuditFields(entries);
+        }
+
+        function getAuditSessionId(log = {}) {
+            const targetType = String(log.targetType || '').toLowerCase();
+            if (log.metadata?.sessionId) return log.metadata.sessionId;
+            if (targetType.includes('session')) return log.targetId;
+            return log.metadata?.session || mockSessionId(log);
+        }
+
+        function getAuditRecordId(log = {}) {
+            return log.id || log._id || `AUD-${auditHash(`${auditSeed(log)}:record`).toString(16).toUpperCase()}`;
+        }
+
+        function getAuditIp(log = {}) {
+            return auditDisplayValue(log.ipAddress);
+        }
+
+        function formatAuditUserAgent(userAgent) {
+            const value = auditDisplayValue(userAgent);
+            if (value === 'Not Captured') return value;
+            const browserMatch = value.match(/(Edg|Chrome|Firefox|Version)\/([\d.]+)/i);
+            const browserName = browserMatch?.[1] === 'Edg'
+                ? 'Edge'
+                : browserMatch?.[1] === 'Version'
+                    ? 'Safari'
+                    : browserMatch?.[1] || 'Browser';
+            const browserVersion = browserMatch?.[2]?.split('.')[0] || '';
+            const os = value.includes('Mac OS X')
+                ? `macOS ${value.match(/Mac OS X ([\d_]+)/)?.[1]?.replace(/_/g, '.') || ''}`.trim()
+                : value.includes('Windows NT 10')
+                    ? 'Windows 10/11'
+                    : value.includes('Windows')
+                        ? 'Windows'
+                        : value.includes('Linux')
+                            ? 'Linux'
+                            : value.includes('Android')
+                                ? 'Android'
+                                : value.includes('iPhone') || value.includes('iPad')
+                                    ? 'iOS'
+                                    : '';
+            return [browserName + (browserVersion ? ` ${browserVersion}` : ''), os].filter(Boolean).join(' · ') || value;
+        }
+
+        function isAutomatedAuditActorEvent(log = {}) {
+            const action = String(log.action || '').toLowerCase();
+            const source = String(log.metadata?.source || '').toLowerCase();
+            return action.includes('auto incident')
+                || action.includes('alert auto generated')
+                || action.includes('bulk logs created')
+                || action.includes('mock logs generated')
+                || action.includes('security log generated')
+                || action.includes('status/health')
+                || source.includes('live-stream')
+                || source.includes('mock-generator')
+                || source.includes('system-auto');
+        }
+
+        function getAuditDrawerActor(log = {}) {
+            if (isAutomatedAuditActorEvent(log)) {
+                return {
+                    name: 'System',
+                    email: 'system@microsoc.local',
+                    role: 'system'
+                };
+            }
+
+            return {
+                name: log.actorName || 'System',
+                email: auditDisplayValue(log.actorEmail),
+                role: log.actorRole || log.metadata?.role || 'system'
+            };
+        }
+
+        function renderAuditDetails(log = {}, drawerActor = getAuditDrawerActor(log)) {
+            const action = String(log.action || '').toLowerCase();
+            if (action.includes('logged in')) {
+                return [
+                    'Authentication successful.',
+                    `Role: ${auditDisplayValue(drawerActor.role)}`,
+                    'Access granted.'
+                ].join('\n');
+            }
+            return log.details || 'No details captured.';
+        }
+
+        const renderSummary = (stats = {}, logs = currentLogs) => {
+            const visibleLogs = Array.isArray(logs) ? logs : [];
+            const totalEvents = visibleLogs.length || stats.totalEvents?.[0]?.count || 0;
+            const byRole = visibleLogs.reduce((acc, log) => {
+                const role = getAuditGroupRole(log);
+                acc[role] = (acc[role] || 0) + 1;
+                return acc;
+            }, {});
             const byResult = Object.fromEntries((stats.byResult || []).map((item) => [item._id, item.count]));
             const byModule = Object.fromEntries((stats.byModule || []).map((item) => [item._id, item.count]));
 
@@ -2270,6 +2531,8 @@
         function renderDrawer(log) {
             if (!log) return;
             drawerTitle.textContent = log.action || 'Audit Entry';
+            const sessionId = getAuditSessionId(log);
+            const drawerActor = getAuditDrawerActor(log);
             drawerBody.innerHTML = `
                 <div class="audit-drawer-section">
                     <span class="audit-drawer-label">Timestamp</span>
@@ -2277,13 +2540,13 @@
                 </div>
                 <div class="audit-drawer-section">
                     <span class="audit-drawer-label">Actor</span>
-                    <strong>${escapeHtml(log.actorName || 'System')}</strong>
-                    <div class="audit-subtext">${escapeHtml(log.actorEmail || 'Unknown')}</div>
+                    <strong>${escapeHtml(drawerActor.name)}</strong>
+                    <div class="audit-subtext">${escapeHtml(drawerActor.email)}</div>
                 </div>
                 <div class="audit-drawer-grid">
                     <div class="audit-drawer-section">
                         <span class="audit-drawer-label">Role</span>
-                        <strong>${escapeHtml(String(log.actorRole || 'system').toUpperCase())}</strong>
+                        <strong>${escapeHtml(String(drawerActor.role || 'system').toUpperCase())}</strong>
                     </div>
                     <div class="audit-drawer-section">
                         <span class="audit-drawer-label">Result</span>
@@ -2300,17 +2563,16 @@
                 </div>
                 <div class="audit-drawer-section">
                     <span class="audit-drawer-label">Details</span>
-                    <p>${escapeHtml(log.details || 'No details')}</p>
-                </div>
-                <div class="audit-drawer-section">
-                    <span class="audit-drawer-label">Metadata</span>
-                    <pre>${escapeHtml(formatJson(log.metadata))}</pre>
+                    <p>${escapeHtml(renderAuditDetails(log, drawerActor))}</p>
                 </div>
                 <div class="audit-drawer-section">
                     <span class="audit-drawer-label">Technical</span>
-                    <div class="audit-subtext">IP: ${escapeHtml(log.ipAddress || 'Unknown')}</div>
-                    <div class="audit-subtext">User Agent: ${escapeHtml(log.userAgent || 'Unknown')}</div>
-                    <div class="audit-subtext">Record ID: ${escapeHtml(log.id || log._id || 'Unknown')}</div>
+                    ${renderAuditFields([
+                        { label: 'Session ID', value: sessionId },
+                        { label: 'Record ID', value: getAuditRecordId(log) },
+                        { label: 'IP', value: getAuditIp(log) },
+                        { label: 'User Agent', value: formatAuditUserAgent(log.userAgent) }
+                    ])}
                 </div>
             `;
             drawer.hidden = false;
@@ -2333,7 +2595,7 @@
             };
 
             logs.forEach((log, index) => {
-                const key = normalizeRole(log.actorRole);
+                const key = getAuditGroupRole(log);
                 roleGroups[key].push({ ...log, __index: index });
             });
 
@@ -2398,7 +2660,6 @@
                                                     <td><span class="audit-module">${escapeHtml(log.module || 'general')}</span></td>
                                                     <td>
                                                         <div>${escapeHtml(log.targetLabel || log.targetType || 'N/A')}</div>
-                                                        <div class="audit-subtext">${escapeHtml([log.targetType, log.targetId].filter(Boolean).join(' · '))}</div>
                                                     </td>
                                                     <td><span class="badge badge-${log.result === 'failure' ? 'danger' : log.result === 'warning' ? 'warning' : 'success'}">${escapeHtml(String(log.result || 'success').toUpperCase())}</span></td>
                                                 </tr>
@@ -2436,7 +2697,7 @@
 
             const payload = await apiRequest(`/audit-logs?${params.toString()}`);
             currentLogs = payload.logs || [];
-            renderSummary(payload.stats || {});
+            renderSummary(payload.stats || {}, currentLogs);
             renderGroups(currentLogs);
         }
 
@@ -2779,10 +3040,6 @@
             incidentFields.innerHTML = `
                 ${numberControl('incidentConfig.createIncidentAfter', 'Create Incident After', 'How many similar alerts auto-create an incident.', 1, 20, 1)}
                 ${toggleControl('incidentConfig.severityEscalationEnabled', 'Severity Escalation', 'Escalate repeated alerts into incidents automatically.')}
-                <div class="settings-help-card">
-                    <strong>Incident Rules</strong>
-                    <p>Similar alerts are correlated by rule and source. When occurrence count reaches this number, MicroSOC auto-creates or updates an incident.</p>
-                </div>
             `;
 
             aiFields.innerHTML = `
@@ -3256,12 +3513,20 @@
             const data = await apiRequest(query);
             const incidents = mergeIncidents(data.incidents || []);
             currentIncidents = incidents;
-            workbench.innerHTML = incidents.map(incident => `
-                <article class="incident-ticket ${incident.severity}">
-                    <div>
-                        <strong>${incident.title}</strong>
-                        <span>${incident.status.replace('_', ' ')} · ${incident.severity}</span>
-                    </div>
+	            workbench.innerHTML = incidents.map(incident => {
+                    const cveBadges = renderCveBadges(incident);
+                    return `
+	                <article class="incident-ticket ${incident.severity}">
+	                    <div>
+	                        <strong>${incident.title}</strong>
+	                        <span>${incident.status.replace('_', ' ')} · ${incident.severity}</span>
+                            <div class="alert-meta" style="margin-top:8px;">
+                                <span><i class="fas fa-fingerprint"></i> ${escapeInline(getMitreForItem(incident))}</span>
+                            </div>
+	                        ${cveBadges ? `<div class="alert-meta" style="margin-top:8px;">
+	                            <span><i class="fas fa-bug"></i> ${renderCveBadges(incident)}</span>
+	                        </div>` : ''}
+	                    </div>
                     <div class="ticket-actions">
                         <button type="button" data-status="${incident._id || incident.id}:in_progress">In Progress</button>
                         <button type="button" data-status="${incident._id || incident.id}:resolved">Resolve</button>
@@ -3270,22 +3535,30 @@
                         ${role === 'admin' ? '<button type="button" data-admin-incident="edit">Edit</button>' : '<button type="button" data-admin-incident="note">Add Note</button>'}
                     </div>
                 </article>
-            `).join('') || '<p class="empty-state">No incidents yet.</p>';
+            `;
+                }).join('') || '<p class="empty-state">No incidents yet.</p>';
         }
 
         if (role === 'admin') {
             panel.querySelector('form').addEventListener('submit', async (event) => {
                 event.preventDefault();
                 const form = new FormData(event.currentTarget);
+                const relatedCves = getThreatContextForAttack(form.get('title')).cves;
+                const mitreTechnique = getThreatContextForAttack(form.get('title')).mitre;
+                const cveText = relatedCves.length ? `\n\nRelated CVEs: ${relatedCves.join(', ')}` : '';
                 await apiRequest('/incidents', {
                     method: 'POST',
-                    body: JSON.stringify({
-                        title: form.get('title'),
-                        description: `${form.get('severity')} incident created from analyst console`,
-                        severity: form.get('severity'),
-                        sourceIP: form.get('sourceIP') || undefined,
-                        category: 'other'
-                    })
+	                    body: JSON.stringify({
+	                        title: form.get('title'),
+	                        description: `${form.get('severity')} incident created from analyst console\n\nMITRE: ${mitreTechnique}${cveText}`,
+	                        severity: form.get('severity'),
+	                        sourceIP: form.get('sourceIP') || undefined,
+	                        relatedCves,
+                            threatIntel: {
+                                mitreTechnique
+                            },
+	                        category: 'other'
+	                    })
                 });
                 event.currentTarget.reset();
                 loadIncidents();
@@ -3539,30 +3812,264 @@
                 <form data-ioc-form><input name="ioc" placeholder="185.220.101.10 or domain"><button type="submit">Analyze IOC</button></form>
                 <form data-mitre-form><input name="attack" placeholder="SQL Injection"><button type="submit">Map MITRE</button></form>
             </div>
-            <pre class="intel-result" data-intel-result>Ready for enrichment.</pre>
+            <div class="intel-result" data-intel-result>
+                <div class="intel-empty">
+                    Search a CVE, IOC, or attack type to generate an analyst-ready intelligence card.
+                </div>
+            </div>
         `;
         host.appendChild(panel);
         const result = panel.querySelector('[data-intel-result]');
-        const show = data => {
-            result.textContent = JSON.stringify(data, null, 2);
+        const toList = (value, fallback = []) => {
+            if (Array.isArray(value)) return value.filter(Boolean);
+            if (typeof value === 'string' && value.trim()) return [value.trim()];
+            return fallback;
+        };
+        const titleCase = (value = '') => String(value || 'unknown')
+            .replace(/[-_]/g, ' ')
+            .replace(/\b\w/g, letter => letter.toUpperCase());
+        const statusClass = value => String(value || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        const renderField = (label, value) => `
+            <div class="intel-field">
+                <span>${escapeInline(label)}</span>
+                <strong>${escapeInline(value || 'N/A')}</strong>
+            </div>
+        `;
+        const renderActions = items => `
+            <ul class="intel-action-list">
+                ${toList(items, ['Review related logs', 'Validate exposed assets', 'Monitor for repeat activity']).map(item => `
+                    <li><i class="fas fa-check-circle"></i><span>${escapeInline(item)}</span></li>
+                `).join('')}
+            </ul>
+        `;
+        const renderReferences = (refs, cveId) => {
+            const referenceItems = toList(refs);
+            if (cveId) {
+                referenceItems.push({ label: 'NVD', url: `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cveId)}` });
+                referenceItems.push({ label: 'CVE Record', url: `https://www.cve.org/CVERecord?id=${encodeURIComponent(cveId)}` });
+            }
+            const uniqueRefs = referenceItems.reduce((items, ref) => {
+                const label = typeof ref === 'string' ? ref : ref.label || ref.name || ref.url;
+                const url = typeof ref === 'string' ? ref : ref.url || ref.href;
+                const key = `${label}-${url || ''}`;
+                if (!items.some(item => item.key === key)) items.push({ key, label, url });
+                return items;
+            }, []);
+            if (!uniqueRefs.length) return '';
+            return `
+                <div class="intel-reference-row">
+                    ${uniqueRefs.map(ref => ref.url && /^https?:\/\//i.test(ref.url)
+                        ? `<a href="${escapeInline(ref.url)}" target="_blank" rel="noopener noreferrer">${escapeInline(ref.label || 'Reference')}</a>`
+                        : `<span>${escapeInline(ref.label || 'Reference')}</span>`
+                    ).join('')}
+                </div>
+            `;
+        };
+        const getLocalIocObservations = ioc => {
+            const value = String(ioc || '').trim().toLowerCase();
+            if (!value) return [];
+            try {
+                const logs = JSON.parse(localStorage.getItem('microsocSecurityLogs') || '[]');
+                if (!Array.isArray(logs)) return [];
+                return logs
+                    .filter(log => {
+                        const haystack = [
+                            log.sourceIP,
+                            log.description,
+                            log.targetSystem,
+                            log.country,
+                            log.attackType
+                        ].filter(Boolean).join(' ').toLowerCase();
+                        return haystack.includes(value);
+                    })
+                    .slice(0, 50)
+                    .map(log => ({
+                        sourceIP: log.sourceIP,
+                        country: log.country,
+                        attackType: log.attackType,
+                        severity: log.severity,
+                        isBlocked: log.isBlocked,
+                        timestamp: log.timestamp || log.createdAt,
+                        description: log.description,
+                        targetSystem: log.targetSystem
+                    }));
+            } catch (error) {
+                return [];
+            }
+        };
+        const inferAffectedProduct = cve => {
+            const text = `${cve?.title || ''} ${cve?.summary || ''}`.toLowerCase();
+            if (cve?.affectedProduct || cve?.product || cve?.vendor) return cve.affectedProduct || cve.product || cve.vendor;
+            if (text.includes('outlook')) return 'Microsoft Outlook';
+            if (text.includes('log4j')) return 'Apache Log4j';
+            if (text.includes('moveit')) return 'MOVEit Transfer';
+            if (text.includes('xz')) return 'XZ Utils';
+            if (text.includes('spring')) return 'Spring Framework';
+            if (text.includes('big-ip') || text.includes('f5')) return 'F5 BIG-IP';
+            if (text.includes('http/2')) return 'HTTP/2 enabled web services';
+            return 'Review asset inventory';
+        };
+        const tacticForTechnique = technique => {
+            const id = String(technique || '').match(/T\d+(?:\.\d+)?/)?.[0] || '';
+            const tactics = {
+                T1190: 'Initial Access',
+                T1059: 'Execution',
+                T1189: 'Initial Access',
+                T1110: 'Credential Access',
+                T1078: 'Defense Evasion / Persistence',
+                T1046: 'Discovery',
+                T1595: 'Reconnaissance',
+                T1498: 'Impact',
+                T1566: 'Initial Access',
+                T1204: 'Execution',
+                T1486: 'Impact',
+                T1082: 'Discovery',
+                T1071: 'Command and Control'
+            };
+            return tactics[id] || 'Mapped ATT&CK tactic';
+        };
+        const renderCard = ({ kind, badge, title, subtitle, fields, description, actionsTitle, actions, references }) => `
+            <article class="intel-result-card">
+                <div class="intel-result-head">
+                    <div>
+                        <span class="intel-kicker">${escapeInline(kind)}</span>
+                        <h3>${escapeInline(title)}</h3>
+                        ${subtitle ? `<p>${escapeInline(subtitle)}</p>` : ''}
+                    </div>
+                    <span class="intel-status-badge ${statusClass(badge)}">${escapeInline(titleCase(badge))}</span>
+                </div>
+                <div class="intel-grid">
+                    ${fields.map(field => renderField(field.label, field.value)).join('')}
+                </div>
+                ${description ? `<p class="intel-description">${escapeInline(description)}</p>` : ''}
+                <div class="intel-actions">
+                    <strong>${escapeInline(actionsTitle || 'Recommended Actions')}</strong>
+                    ${renderActions(actions)}
+                </div>
+                ${references || ''}
+            </article>
+        `;
+        const showLoading = label => {
+            result.innerHTML = `<div class="intel-empty intel-loading">${escapeInline(label)}...</div>`;
+        };
+        const showError = error => {
+            result.innerHTML = renderCard({
+                kind: 'Lookup Error',
+                badge: 'unknown',
+                title: 'Intelligence lookup failed',
+                subtitle: 'The request could not be completed.',
+                fields: [
+                    { label: 'Status', value: 'Unavailable' },
+                    { label: 'Next Step', value: 'Check backend/API connection' }
+                ],
+                description: error?.message || 'Unable to fetch threat intelligence right now.',
+                actionsTitle: 'Recovery',
+                actions: ['Retry the lookup', 'Confirm the backend server is running', 'Check the browser console for request errors']
+            });
+        };
+        const renderCve = (data, query) => {
+            const cve = data?.cve || data?.data?.cve || data?.result || {};
+            const cveId = cve.id || query || 'CVE lookup';
+            const severity = cve.severity || cve.baseSeverity || cve.cvssSeverity || 'unknown';
+            const cvss = cve.cvss ?? cve.cvssScore ?? cve.score ?? 'N/A';
+            const title = cve.title || cve.name || `${cveId} vulnerability intelligence`;
+            result.innerHTML = renderCard({
+                kind: cveId,
+                badge: severity,
+                title,
+                subtitle: 'CVE Intelligence',
+                fields: [
+                    { label: 'Severity', value: titleCase(severity) },
+                    { label: 'CVSS Score', value: cvss === null ? 'Not available' : cvss },
+                    { label: 'Affected Product', value: inferAffectedProduct(cve) },
+                    { label: 'Source', value: data?.success ? 'Local threat catalog' : 'Threat enrichment' }
+                ],
+                description: cve.description || cve.summary || 'No description available for this CVE in the current catalog.',
+                actionsTitle: 'Recommended Mitigation',
+                actions: cve.mitigations || cve.mitigation || cve.recommendations,
+                references: renderReferences(cve.references || cve.refs, cveId)
+            });
+        };
+        const renderIoc = (data, query) => {
+            const ioc = data?.results?.[0] || data?.ioc || data?.result || {};
+            const reputation = ioc.reputation || ioc.verdict || ioc.classification || 'unknown';
+            const confidence = ioc.confidence ?? ioc.threatScore ?? ioc.score ?? 'N/A';
+            result.innerHTML = renderCard({
+                kind: 'IOC Analysis',
+                badge: reputation,
+                title: ioc.value || query || 'Indicator',
+                subtitle: 'Indicator reputation and response guidance',
+                fields: [
+                    { label: 'IOC Type', value: titleCase(ioc.type || 'unknown') },
+                    { label: 'Reputation', value: titleCase(reputation) },
+                    { label: 'Country', value: ioc.country || ioc.geo?.country || 'Unknown' },
+                    { label: 'Threat Score', value: confidence === 'N/A' ? 'N/A' : `${confidence}/100` },
+                    { label: 'Known Activity', value: ioc.knownActivity || ioc.activity || 'No matching log activity' },
+                    { label: 'Observed Logs', value: ioc.observedCount ? `${ioc.observedCount} event${ioc.observedCount === 1 ? '' : 's'}` : 'No matches' }
+                ],
+                description: ioc.knownActivity || ioc.activity || ioc.description || 'Correlate this indicator with recent logs, affected assets, and network telemetry before taking broad blocking action.',
+                actionsTitle: 'Recommendation',
+                actions: ioc.recommendations || ioc.recommendation || ['Monitor related traffic', 'Block if business use is not required', 'Create a detection rule for repeated sightings']
+            });
+        };
+        const renderMitre = (data, query) => {
+            const mapping = data?.mapping || data?.mitre || data?.result || {};
+            const techniques = toList(mapping.techniques || mapping.technique);
+            const primaryTechnique = techniques[0] || 'T1082 System Information Discovery';
+            const techniqueId = primaryTechnique.match(/T\d+(?:\.\d+)?/)?.[0] || primaryTechnique;
+            const techniqueName = primaryTechnique.replace(/^T\d+(?:\.\d+)?\s*/, '') || 'Mapped technique';
+            const tactic = mapping.tactic || mapping.tactics || tacticForTechnique(primaryTechnique);
+            result.innerHTML = renderCard({
+                kind: 'MITRE ATT&CK Mapping',
+                badge: 'mapped',
+                title: `${techniqueId} ${techniqueName}`.trim(),
+                subtitle: query || mapping.input || 'Attack behavior mapping',
+                fields: [
+                    { label: 'Technique', value: techniqueId },
+                    { label: 'Tactic', value: Array.isArray(tactic) ? tactic.join(', ') : tactic },
+                    { label: 'Confidence', value: mapping.confidence ? `${mapping.confidence}%` : 'Estimated' },
+                    { label: 'Related Techniques', value: techniques.slice(1).join(', ') || 'None' }
+                ],
+                description: mapping.description || 'This mapping helps connect the observed behavior to MITRE ATT&CK so the SOC can choose detections, mitigations, and containment steps faster.',
+                actionsTitle: 'Mitigation',
+                actions: mapping.mitigations || mapping.mitigation || ['Enforce MFA where credentials are involved', 'Apply rate limiting and alert thresholds', 'Review affected accounts and host telemetry']
+            });
         };
         panel.querySelector('[data-cve-form]').addEventListener('submit', async (event) => {
             event.preventDefault();
-            show(await apiRequest(`/threat-intel/cve/${new FormData(event.currentTarget).get('cve') || 'CVE-2021-44228'}`));
+            const cve = String(new FormData(event.currentTarget).get('cve') || 'CVE-2021-44228').trim().toUpperCase();
+            showLoading(`Looking up ${cve}`);
+            try {
+                renderCve(await apiRequest(`/threat-intel/cve/${encodeURIComponent(cve)}`), cve);
+            } catch (error) {
+                showError(error);
+            }
         });
         panel.querySelector('[data-ioc-form]').addEventListener('submit', async (event) => {
             event.preventDefault();
-            show(await apiRequest('/threat-intel/ioc-analysis', {
-                method: 'POST',
-                body: JSON.stringify({ ioc: new FormData(event.currentTarget).get('ioc') })
-            }));
+            const ioc = String(new FormData(event.currentTarget).get('ioc') || '').trim();
+            showLoading(`Analyzing ${ioc || 'IOC'}`);
+            try {
+                renderIoc(await apiRequest('/threat-intel/ioc-analysis', {
+                    method: 'POST',
+                    body: JSON.stringify({ ioc, observations: getLocalIocObservations(ioc) })
+                }), ioc);
+            } catch (error) {
+                showError(error);
+            }
         });
         panel.querySelector('[data-mitre-form]').addEventListener('submit', async (event) => {
             event.preventDefault();
-            show(await apiRequest('/threat-intel/mitre-map', {
-                method: 'POST',
-                body: JSON.stringify({ attackType: new FormData(event.currentTarget).get('attack') })
-            }));
+            const attackType = String(new FormData(event.currentTarget).get('attack') || '').trim();
+            showLoading(`Mapping ${attackType || 'attack behavior'}`);
+            try {
+                renderMitre(await apiRequest('/threat-intel/mitre-map', {
+                    method: 'POST',
+                    body: JSON.stringify({ attackType })
+                }), attackType);
+            } catch (error) {
+                showError(error);
+            }
         });
     }
 

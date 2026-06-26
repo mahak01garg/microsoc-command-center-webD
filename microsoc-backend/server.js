@@ -14,6 +14,7 @@ const realtimeHub = require('./utils/realtimeHub');
 const app = express();
 const server = http.createServer(app);
 app.set('etag', false);
+app.set('trust proxy', 1);
 
 // =====================
 // CORS (🔥 MUST BE FIRST)

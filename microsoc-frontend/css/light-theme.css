@@ -463,6 +463,11 @@ select[multiple] option:hover {
     justify-content: center;
 }
 
+.sidebar-nav .badge,
+.sidebar-nav .nav-badge {
+    display: none !important;
+}
+
 /* Header */
 .main-header {
     background-color: var(--header-bg);

@@ -153,26 +153,20 @@ async function loadStats() {
     container.innerHTML = '<div class="empty-state">Loading dashboard stats...</div>';
 
     try {
-        const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/dashboard/stats`, {
-            headers: getAuthHeaders()
-        });
-        if (!response.ok || !payload.success) {
-            throw new Error(payload.message || 'Could not load dashboard stats');
-        }
-        const stats = payload.stats || [];
-
-        if (stats.length && stats.some(stat => String(stat.value || '').trim() !== '0')) {
-            renderDashboardStats(stats);
-            return;
-        }
-
         const logStats = await fetchLogStatsFallback();
+        const dashboardStats = await fetchDashboardStatsFallback();
+
         if (logStats) {
-            renderDashboardStats(buildStatsFromLogStats(logStats));
+            renderDashboardStats(buildStatsFromLogStats(logStats, dashboardStats));
             return;
         }
 
-        renderDashboardStats(stats);
+        if (dashboardStats.length && dashboardStats.some(stat => String(stat.value || '').trim() !== '0')) {
+            renderDashboardStats(dashboardStats);
+            return;
+        }
+
+        renderDashboardStats(dashboardStats);
     } catch (error) {
         console.error('Dashboard stats failed:', error);
         const logStats = await fetchLogStatsFallback();
@@ -184,11 +178,37 @@ async function loadStats() {
     }
 }
 
+async function fetchDashboardStatsFallback() {
+    try {
+        const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/dashboard/stats`, {
+            headers: getAuthHeaders()
+        });
+        if (!response.ok || !payload.success) {
+            return [];
+        }
+        return Array.isArray(payload.stats) ? payload.stats : [];
+    } catch (error) {
+        console.warn('Dashboard stats fetch failed:', error);
+        return [];
+    }
+}
+
 function renderDashboardStats(stats) {
     const container = document.getElementById('stats-container');
     if (!container) return;
-    const blockedStat = (Array.isArray(stats) ? stats : []).find(stat => stat.title === 'Blocked Attacks');
-    const normalizedStats = (Array.isArray(stats) ? stats : []).map(stat => {
+    const statList = Array.isArray(stats) ? stats : [];
+    const parseStatNumber = value => Number(String(value ?? '').replace(/[^\d.]/g, '')) || 0;
+    const blockedStat = statList.find(stat => stat.title === 'Blocked Attacks');
+    const totalStat = statList.find(stat => /total logs|total attacks|logs \(24h\)|total/i.test(String(stat.title || '')));
+    const blockedCount = parseStatNumber(blockedStat?.value);
+    const totalCount = parseStatNumber(totalStat?.value);
+    const preventionDetail = totalCount > 0
+        ? `${blockedCount.toLocaleString()} / ${totalCount.toLocaleString()} attacks blocked`
+        : 'No attack volume yet';
+    const normalizedStats = statList.map(stat => {
+        if (stat.title === 'Attack Prevention' && !stat.detail) {
+            return { ...stat, detail: preventionDetail };
+        }
         if (stat.title !== 'Unique Sources') return stat;
         return {
             ...stat,
@@ -208,6 +228,7 @@ function renderDashboardStats(stats) {
             <div class="stat-info">
                 <h3>${stat.title}</h3>
                 <div class="stat-value">${stat.value}</div>
+                ${stat.detail ? `<div class="stat-detail">${stat.detail}</div>` : ''}
                 <div class="stat-change ${stat.changeType}">
                     <i class="fas fa-arrow-${stat.changeType === 'positive' ? 'up' : 'down'}"></i>
                     ${stat.change}
@@ -219,7 +240,7 @@ function renderDashboardStats(stats) {
 
 async function fetchLogStatsFallback() {
     try {
-        const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs/stats?timeRange=24h`, {
+        const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs/stats?timeRange=all`, {
             headers: getAuthHeaders()
         });
         if (!response.ok || !payload.success || !payload.stats) {
@@ -427,7 +448,11 @@ function summarizeLogStats(logStats) {
     };
 }
 
-function buildStatsFromLogStats(logStats) {
+function pickDashboardStat(stats, title, fallback) {
+    return (Array.isArray(stats) ? stats : []).find(stat => stat.title === title) || fallback;
+}
+
+function buildStatsFromLogStats(logStats, dashboardStats = []) {
     const summary = summarizeLogStats(logStats);
     const severityTotal = Math.max(1, summary.criticalLogs + summary.highLogs + summary.mediumLogs);
     const logPressure = Math.round(
@@ -455,38 +480,48 @@ function buildStatsFromLogStats(logStats) {
             icon: 'fa-shield-virus',
             title: 'Security Score',
             value: `${securityScore}/100`,
+            detail: `92 - severity ${logPressure} - response ${responsePressure} + prevention ${resilienceBonus}`,
             change: summary.totalLogs > 0 ? `${summary.blockedPercentage}% blocked` : 'Awaiting logs',
             changeType: securityScore >= 80 ? 'positive' : 'negative',
             color: '#20c997'
         },
         {
             icon: 'fa-broadcast-tower',
-            title: 'Total Logs (24h)',
+            title: 'Total Logs',
             value: summary.totalLogs.toLocaleString(),
             change: summary.totalLogs > 0 ? `${summary.totalLogs >= 100 ? '+' : ''}${summary.totalLogs}` : 'No activity',
             changeType: summary.totalLogs > 0 ? 'negative' : 'positive',
             color: '#007bff'
         },
-        {
+        pickDashboardStat(dashboardStats, 'Active Incidents', {
             icon: 'fa-exclamation-triangle',
+            title: 'Active Incidents',
+            value: 0,
+            change: 'Stable',
+            changeType: 'positive',
+            color: '#dc3545'
+        }),
+        pickDashboardStat(dashboardStats, 'Critical Threats', {
+            icon: 'fa-skull-crossbones',
             title: 'Critical Threats',
             value: summary.criticalLogs,
             change: summary.criticalLogs > 0 ? '+Active' : 'Stable',
             changeType: summary.criticalLogs > 0 ? 'negative' : 'positive',
-            color: '#dc3545'
-        },
-        {
+            color: '#fd7e14'
+        }),
+        pickDashboardStat(dashboardStats, 'Avg Response Time', {
             icon: 'fa-clock',
-            title: 'Blocked Attacks',
-            value: summary.blockedAttacks,
-            change: `${summary.blockedPercentage}%`,
-            changeType: summary.blockedPercentage >= 50 ? 'positive' : 'negative',
+            title: 'Avg Response Time',
+            value: 'N/A',
+            change: 'Waiting',
+            changeType: 'positive',
             color: '#28a745'
-        },
+        }),
         {
             icon: 'fa-shield-alt',
             title: 'Attack Prevention',
             value: `${summary.blockedPercentage}%`,
+            detail: `${summary.blockedAttacks.toLocaleString()} / ${summary.totalLogs.toLocaleString()} attacks blocked`,
             change: summary.blockedPercentage >= 50 ? 'Strong' : 'Needs tuning',
             changeType: summary.blockedPercentage >= 50 ? 'positive' : 'negative',
             color: '#17a2b8'
@@ -494,7 +529,7 @@ function buildStatsFromLogStats(logStats) {
         {
             icon: 'fa-ban',
             title: 'Blocked Attacks',
-            value: summary.blockedAttacks,
+            value: summary.blockedAttacks.toLocaleString(),
             change: `${summary.blockedPercentage}% blocked`,
             changeType: summary.blockedAttacks > 0 ? 'positive' : 'negative',
             color: '#28a745'
@@ -515,8 +550,8 @@ function loadLocalStats() {
         { icon: 'fa-exclamation-triangle', title: 'Active Incidents', value: '0', change: 'Waiting', changeType: 'positive', color: '#dc3545' },
         { icon: 'fa-skull-crossbones', title: 'Critical Threats', value: '0', change: 'Waiting', changeType: 'positive', color: '#fd7e14' },
         { icon: 'fa-clock', title: 'Avg Response Time', value: 'N/A', change: 'Waiting', changeType: 'positive', color: '#28a745' },
-        { icon: 'fa-shield-alt', title: 'Attack Prevention', value: '0%', change: 'Waiting', changeType: 'positive', color: '#17a2b8' },
-        { icon: 'fa-ban', title: 'Blocked Attacks', value: '0', change: 'Waiting', changeType: 'positive', color: '#28a745' }
+        { icon: 'fa-shield-alt', title: 'Attack Prevention', value: '0%', detail: '0 / 0 attacks blocked', change: 'Waiting', changeType: 'positive', color: '#17a2b8' },
+        { icon: 'fa-ban', title: 'Blocked Attacks', value: '0', change: 'Waiting', changeType: 'positive', color: '#28a745' },
     ]);
 }
 
@@ -558,13 +593,14 @@ function buildStatsFromStoredLogs(summary) {
             icon: 'fa-shield-virus',
             title: 'Security Score',
             value: `${securityScore}/100`,
+            detail: `92 - severity ${logPressure} - response ${responsePressure} + prevention ${resilienceBonus}`,
             change: `${summary.blockedPercentage}% blocked`,
             changeType: securityScore >= 80 ? 'positive' : 'negative',
             color: '#20c997'
         },
         {
             icon: 'fa-broadcast-tower',
-            title: 'Total Logs (24h)',
+            title: 'Total Logs',
             value: summary.totalLogs.toLocaleString(),
             change: `${summary.totalLogs} live events`,
             changeType: summary.totalLogs > 0 ? 'negative' : 'positive',
@@ -572,24 +608,33 @@ function buildStatsFromStoredLogs(summary) {
         },
         {
             icon: 'fa-exclamation-triangle',
+            title: 'Active Incidents',
+            value: 0,
+            change: 'Local only',
+            changeType: 'positive',
+            color: '#dc3545'
+        },
+        {
+            icon: 'fa-skull-crossbones',
             title: 'Critical Threats',
             value: summary.criticalLogs,
             change: summary.criticalLogs > 0 ? '+Active' : 'Stable',
             changeType: summary.criticalLogs > 0 ? 'negative' : 'positive',
-            color: '#dc3545'
+            color: '#fd7e14'
         },
         {
             icon: 'fa-clock',
-            title: 'Blocked Attacks',
-            value: summary.blockedAttacks,
-            change: `${summary.blockedPercentage}%`,
-            changeType: summary.blockedPercentage >= 50 ? 'positive' : 'negative',
+            title: 'Avg Response Time',
+            value: 'N/A',
+            change: 'Backend needed',
+            changeType: 'positive',
             color: '#28a745'
         },
         {
             icon: 'fa-shield-alt',
             title: 'Attack Prevention',
             value: `${summary.blockedPercentage}%`,
+            detail: `${summary.blockedAttacks.toLocaleString()} / ${summary.totalLogs.toLocaleString()} attacks blocked`,
             change: summary.blockedPercentage >= 50 ? 'Strong' : 'Needs tuning',
             changeType: summary.blockedPercentage >= 50 ? 'positive' : 'negative',
             color: '#17a2b8'
@@ -597,7 +642,7 @@ function buildStatsFromStoredLogs(summary) {
         {
             icon: 'fa-ban',
             title: 'Blocked Attacks',
-            value: summary.blockedAttacks,
+            value: summary.blockedAttacks.toLocaleString(),
             change: `${summary.blockedPercentage}% blocked`,
             changeType: summary.blockedAttacks > 0 ? 'positive' : 'negative',
             color: '#28a745'
@@ -1191,6 +1236,7 @@ if (!document.getElementById('dashboard-live-styles')) {
 
         .map-point {
             position: absolute;
+            z-index: 3;
             width: 28px;
             height: 28px;
             border-radius: 999px;

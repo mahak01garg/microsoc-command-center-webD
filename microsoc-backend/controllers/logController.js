@@ -22,7 +22,9 @@ exports.getLogs = async (req, res) => {
     } = req.query;
 
     // Build query
-    const query = {};
+    const query = {
+      archived: { $ne: true }
+    };
 
     // Time range filter
     const now = new Date();
@@ -229,7 +231,11 @@ exports.updateLog = async (req, res) => {
     }
 
     const { id } = req.params;
-    const updateData = req.body;
+    const updateData = { ...req.body };
+    if (updateData.archived === true) {
+      updateData.archivedAt = new Date();
+      updateData.archivedBy = req.user.id;
+    }
 
     const log = await Log.findByIdAndUpdate(
       id,
@@ -350,12 +356,17 @@ exports.createBulkLogs = async (req, res) => {
     });
 
     await recordAuditEvent(req, {
+      systemAction: true,
       action: 'Bulk Logs Created',
       module: 'logs',
       targetType: 'Log Batch',
       targetLabel: `${logs.length} logs`,
-      details: `Created ${logs.length} logs in bulk`,
-      metadata: { count: logs.length }
+      details: `System ingested ${logs.length} security logs`,
+      metadata: {
+        count: logs.length,
+        source: 'bulk-live-stream',
+        submittedBy: req.user?.email || req.user?.name || 'admin'
+      }
     });
 
     res.status(201).json({
@@ -455,12 +466,17 @@ exports.generateMockLogs = async (req, res) => {
     });
 
     await recordAuditEvent(req, {
+      systemAction: true,
       action: 'Mock Logs Generated',
       module: 'logs',
       targetType: 'Log Batch',
       targetLabel: `${createdLogs.length} mock logs`,
-      details: `Generated ${createdLogs.length} mock logs`,
-      metadata: { count: createdLogs.length }
+      details: `System generated ${createdLogs.length} mock security logs`,
+      metadata: {
+        count: createdLogs.length,
+        source: 'mock-generator',
+        submittedBy: req.user?.email || req.user?.name || 'admin'
+      }
     });
 
     res.status(201).json({

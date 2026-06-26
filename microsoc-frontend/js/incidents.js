@@ -2,6 +2,7 @@
 
 let incidents = [];
 let assignableUsersCache = [];
+const ARCHIVED_INCIDENTS_KEY = 'microsocArchivedIncidentIds';
 
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'http://localhost:5001/api';
@@ -33,6 +34,86 @@ function getStoredLocalIncidents() {
     } catch (error) {
         return [];
     }
+}
+
+function getArchivedIncidentIds() {
+    try {
+        const ids = JSON.parse(localStorage.getItem(ARCHIVED_INCIDENTS_KEY) || '[]');
+        return new Set(Array.isArray(ids) ? ids.map(String) : []);
+    } catch (error) {
+        return new Set();
+    }
+}
+
+function rememberArchivedIncidentId(id) {
+    const archivedIds = getArchivedIncidentIds();
+    archivedIds.add(String(id));
+    localStorage.setItem(ARCHIVED_INCIDENTS_KEY, JSON.stringify(Array.from(archivedIds).slice(-1000)));
+}
+
+function filterArchivedIncidents(list) {
+    const archivedIds = getArchivedIncidentIds();
+    return (Array.isArray(list) ? list : []).filter(incident => !archivedIds.has(String(incident.id || incident._id)) && incident.archived !== true);
+}
+
+function getThreatContextForIncident(incident = {}) {
+    const key = [incident.attackType, incident.title, incident.description].filter(Boolean).join(' ').toLowerCase();
+    const contexts = [
+        { match: ['microsoft outlook exploit', 'outlook exploit', 'outlook elevation'], cves: ['CVE-2023-23397'], mitre: 'T1203 - Exploitation for Client Execution' },
+        { match: ['apache struts exploit', 'struts exploit'], cves: ['CVE-2017-5638'], mitre: 'T1190 - Exploit Public-Facing Application' },
+        { match: ['exchange server exploit', 'exchange exploit', 'proxylogon', 'proxyshell'], cves: ['CVE-2021-26855', 'CVE-2021-34473'], mitre: 'T1190 - Exploit Public-Facing Application' },
+        { match: ['log4shell exploit', 'log4j exploit', 'log4shell'], cves: ['CVE-2021-44228'], mitre: 'T1190 - Exploit Public-Facing Application' },
+        { match: ['sql injection', 'sqli'], cves: [], mitre: 'T1190 - Exploit Public-Facing Application' },
+        { match: ['xss', 'cross-site scripting'], cves: [], mitre: 'T1190 - Exploit Public-Facing Application' },
+        { match: ['password spraying', 'password spray'], cves: [], mitre: 'T1110.003 - Password Spraying' },
+        { match: ['brute force', 'credential stuffing', 'credential'], cves: [], mitre: 'T1110 - Brute Force' },
+        { match: ['ddos', 'dos'], cves: [], mitre: 'T1499 - Endpoint Denial of Service' },
+        { match: ['port scan', 'scan'], cves: [], mitre: 'T1046 - Network Service Discovery' },
+        { match: ['phishing', 'phish'], cves: [], mitre: 'T1566 - Phishing' },
+        { match: ['malware'], cves: [], mitre: 'T1204 - User Execution' },
+        { match: ['powershell abuse', 'powershell'], cves: [], mitre: 'T1059.001 - PowerShell' },
+        { match: ['ransomware'], cves: [], mitre: 'T1486 - Data Encrypted for Impact' }
+    ];
+    return contexts.find(context => context.match.some(value => key.includes(value))) || {
+        cves: [],
+        mitre: 'T1190 - Exploit Public-Facing Application'
+    };
+}
+
+function getRelatedCves(incident = {}) {
+    const existing = incident.relatedCves || incident.cves || incident.evidence?.relatedCves || incident.metadata?.relatedCves;
+    if (Array.isArray(existing) && existing.length) return existing;
+
+    const descriptionMatch = String(incident.description || '').match(/Related CVEs:\s*([^\n]+)/i);
+    if (descriptionMatch) {
+        return descriptionMatch[1].split(',').map(value => value.trim()).filter(Boolean);
+    }
+
+    return getThreatContextForIncident(incident).cves;
+}
+
+function getIncidentMitre(incident = {}) {
+    const descriptionMatch = String(incident.description || '').match(/MITRE:\s*([^\n]+)/i);
+    const candidates = [
+        incident.mitreTechnique,
+        incident.threatIntel?.mitreTechnique,
+        incident.evidence?.mitreTechnique,
+        incident.metadata?.mitreTechnique,
+        descriptionMatch?.[1]?.trim()
+    ];
+    const stored = candidates.find(value => {
+        const text = String(value || '').trim();
+        return text && !/^unknown$/i.test(text) && !/^mitre unknown$/i.test(text);
+    });
+    return stored
+        || getThreatContextForIncident(incident).mitre
+        || 'T1190 - Exploit Public-Facing Application';
+}
+
+function renderCveBadges(incident = {}) {
+    return getRelatedCves(incident)
+        .map(cve => `<span class="badge badge-info">${escapeHtml(cve)}</span>`)
+        .join('');
 }
 
 function syncIncidentRoleUi() {
@@ -270,13 +351,13 @@ async function loadIncidents() {
             }
         });
 
-        incidents = mergedIncidents.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        incidents = filterArchivedIncidents(mergedIncidents).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         syncIncidentRoleUi();
         renderInciments(incidents);
         renderIncidentStats(data.stats, incidents);
     } catch (err) {
         console.error("Failed to load incidents", err);
-        incidents = getStoredLocalIncidents().map(normalizeIncident);
+        incidents = filterArchivedIncidents(getStoredLocalIncidents().map(normalizeIncident));
         syncIncidentRoleUi();
         if (incidents.length) {
             renderInciments(incidents);
@@ -292,6 +373,7 @@ function normalizeIncident(incident) {
     const assignedTo = incident.assignedTo && typeof incident.assignedTo === 'object'
         ? incident.assignedTo.name || incident.assignedTo.email
         : incident.assignedTo;
+    const relatedCves = getRelatedCves(incident);
 
     return {
         ...incident,
@@ -309,7 +391,9 @@ function normalizeIncident(incident) {
                 ? incident.relatedLogs.length
                 : incident.logs || 0,
         createdAt: incident.createdAt || incident.updatedAt || new Date().toISOString(),
-        sourceIP: incident.sourceIP || 'N/A'
+        sourceIP: incident.sourceIP || 'N/A',
+        relatedCves,
+        mitreTechnique: getIncidentMitre(incident)
     };
 }
 
@@ -382,12 +466,24 @@ function renderInciments(filteredIncidents = incidents) {
             const isLocal = String(incident.id).startsWith('local-');
             const disabledAttr = isLocal ? 'disabled title="Local incident - read only until backend syncs"' : '';
             const localBadge = isLocal ? '<span class="badge badge-warning" style="margin-left:8px;">LOCAL</span>' : '';
+            const cveBadges = renderCveBadges(incident);
+            const cveRow = cveBadges ? `
+                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">
+                    <span style="font-size:11px;color:var(--text-secondary);">Related CVEs:</span>
+                    ${cveBadges}
+                </div>
+            ` : '';
+            const mitre = getIncidentMitre(incident);
             return `
         <tr data-id="${incident.id}">
-            <td>#${incident.id}</td>
+            <td class="incident-id-cell">#${incident.id}</td>
             <td>
                 <strong>${incident.title}</strong>${localBadge}
                 <div class="incident-description">${incident.description}</div>
+                <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">
+                    MITRE: <strong>${escapeHtml(mitre)}</strong>
+                </div>
+                ${cveRow}
             </td>
             <td>
                 <span class="badge" style="background: ${getSeverityColor(incident.severity)}">
@@ -413,6 +509,7 @@ function renderInciments(filteredIncidents = incidents) {
                 </button>
                 ${admin ? `<button class="btn btn-sm btn-outline" onclick="openAssignIncidentModal('${incident.id}')" ${disabledAttr} title="Assign incident"><i class="fas fa-user-plus"></i></button>` : ''}
                 ${admin ? `<button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')" ${disabledAttr}><i class="fas fa-edit"></i></button>` : `<button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')" ${disabledAttr} title="Update Status"><i class="fas fa-pen"></i></button>`}
+                ${admin ? `<button class="btn btn-sm btn-outline" onclick="archiveIncident('${incident.id}')" ${disabledAttr} title="Archive incident"><i class="fas fa-archive"></i></button>` : ''}
             </td>
         </tr>
             `;
@@ -507,14 +604,21 @@ async function createNewIncident() {
     const description = document.getElementById('incident-description').value;
     const severity = document.getElementById('incident-severity').value;
     const assignee = document.getElementById('incident-assignee').value;
+    const relatedCves = getRelatedCves({ title, description });
+    const mitreTechnique = getIncidentMitre({ title, description });
+    const cveText = relatedCves.length ? `\n\nRelated CVEs: ${relatedCves.join(', ')}` : '';
     const incidentPayload = {
         title,
-        description,
+        description: `${description}\n\nMITRE: ${mitreTechnique}${cveText}`,
         severity,
         status: 'open',
         category: 'other',
         priority: severity,
-        impact: severity
+        impact: severity,
+        relatedCves,
+        threatIntel: {
+            mitreTechnique
+        }
     };
 
     if (isAdminUser() && /^[a-f\d]{24}$/i.test(assignee)) {
@@ -549,6 +653,9 @@ async function createNewIncident() {
 function viewIncident(id) {
     const incident = incidents.find(i => String(i.id) === String(id));
     if (!incident) return;
+    const relatedCves = getRelatedCves(incident);
+    const cveText = relatedCves.length ? `\n        Related CVEs: ${relatedCves.join(', ')}` : '';
+    const mitreTechnique = getIncidentMitre(incident);
     
     const details = `
         Incident #${incident.id}: ${incident.title}
@@ -560,6 +667,8 @@ function viewIncident(id) {
         Assigned To: ${incident.assignedToLabel || incident.assignedTo || 'Unassigned'}
         Created: ${formatDate(incident.createdAt)}
         Source IP: ${incident.sourceIP}
+        MITRE: ${mitreTechnique}
+        ${cveText}
         Related Logs: ${incident.logs}
     `;
     
@@ -687,6 +796,46 @@ async function editIncident(id) {
             console.error('Incident status update failed:', error);
             alert(error.message || 'Incident status update failed');
         }
+    }
+}
+
+async function archiveIncident(id) {
+    if (!isAdminUser()) {
+        showNotification('Only admins can archive incidents.', 'error');
+        return;
+    }
+
+    const incident = incidents.find(item => String(item.id) === String(id));
+    if (!incident) return;
+    if (!confirm('Archive this incident from the active Incidents view?')) return;
+
+    const isLocal = String(id).startsWith('local-');
+    try {
+        if (!isLocal) {
+            const response = await fetch(`${getApiBaseUrl()}/incidents/${id}`, {
+                method: 'PUT',
+                headers: getAuthHeaders(),
+                body: JSON.stringify({ archived: true })
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.message || 'Could not archive incident');
+            }
+        } else {
+            const localIncidents = getStoredLocalIncidents().map(item =>
+                String(item.id) === String(id) ? { ...item, archived: true, archivedAt: new Date().toISOString() } : item
+            );
+            localStorage.setItem('microsocLocalIncidents', JSON.stringify(localIncidents));
+        }
+
+        rememberArchivedIncidentId(id);
+        incidents = incidents.filter(item => String(item.id) !== String(id));
+        renderInciments(incidents);
+        renderIncidentStats(null, incidents);
+        showNotification('Incident archived', 'success');
+    } catch (error) {
+        console.error('Archive incident failed:', error);
+        showNotification(error.message || 'Could not archive incident.', 'error');
     }
 }
 
@@ -889,5 +1038,6 @@ window.viewIncident = viewIncident;
 window.viewIncidentTimeline = viewIncidentTimeline;
 window.closeIncidentTimelineModal = closeIncidentTimelineModal;
 window.editIncident = editIncident;
+window.archiveIncident = archiveIncident;
 window.triageIncidentWithAI = triageIncidentWithAI;
 window.closeAITriageModal = closeAITriageModal;

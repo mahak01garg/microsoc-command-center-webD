@@ -133,13 +133,15 @@ exports.updateSettings = async (req, res) => {
 
     try {
       await recordAuditEvent(req, {
+        systemAction: true,
         action: 'Settings Updated',
         module: 'settings',
         targetType: 'SystemSettings',
         targetId: String(settings._id),
         targetLabel: 'Global SOC Settings',
-        details: 'Admin updated general, alert, incident, AI, or notification settings',
+        details: 'System settings changed through admin controls',
         metadata: {
+          changedBy: req.user?.email || req.user?.name || 'admin',
           previous: before,
           next: normalizeSettings(settings)
         }

@@ -22,9 +22,18 @@ const ATTACK_TYPE_ALIASES = {
   'zero-day': 'Zero-Day',
   'mitm': 'MITM',
   'credential theft': 'Credential Theft',
+  'credential stuffing': 'Credential Stuffing',
+  'password spraying': 'Password Spraying',
+  'password spray': 'Password Spraying',
   'data exfiltration': 'Data Exfiltration',
+  'powershell abuse': 'PowerShell Abuse',
+  'powershell': 'PowerShell Abuse',
   'iot attack': 'IoT Attack',
   'supply chain': 'Supply Chain',
+  'microsoft outlook exploit': 'Microsoft Outlook Exploit',
+  'apache struts exploit': 'Apache Struts Exploit',
+  'exchange server exploit': 'Exchange Server Exploit',
+  'log4shell exploit': 'Log4Shell Exploit',
   'other': 'Other'
 };
 
@@ -59,6 +68,15 @@ function sanitizeString(value) {
 
 function isValidIp(value) {
   return /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?\d\d?)$/.test(String(value || '').trim());
+}
+
+function relatedCvesForAttack(value = '') {
+  const key = String(value || '').toLowerCase();
+  if (key.includes('microsoft outlook exploit') || key.includes('outlook exploit')) return ['CVE-2023-23397'];
+  if (key.includes('apache struts exploit') || key.includes('struts exploit')) return ['CVE-2017-5638'];
+  if (key.includes('exchange server exploit') || key.includes('exchange exploit') || key.includes('proxylogon') || key.includes('proxyshell')) return ['CVE-2021-26855', 'CVE-2021-34473'];
+  if (key.includes('log4shell exploit') || key.includes('log4j exploit') || key.includes('log4shell')) return ['CVE-2021-44228'];
+  return [];
 }
 
 function normalizeLogInput(payload) {
@@ -249,6 +267,34 @@ function otherAttackRule(attackType) {
       riskScore: 95,
       recommendedAction: 'Sanitize inputs, review the affected route, and enforce strict output encoding.'
     },
+    'Microsoft Outlook Exploit': {
+      severity: 'critical',
+      mitreTechnique: 'T1203',
+      confidence: 94,
+      riskScore: 92,
+      recommendedAction: 'Patch Outlook clients, monitor NTLM activity, and review suspicious calendar invites.'
+    },
+    'Apache Struts Exploit': {
+      severity: 'critical',
+      mitreTechnique: 'T1190',
+      confidence: 95,
+      riskScore: 94,
+      recommendedAction: 'Patch Apache Struts, block exploit headers, and review web server command execution.'
+    },
+    'Exchange Server Exploit': {
+      severity: 'critical',
+      mitreTechnique: 'T1190',
+      confidence: 95,
+      riskScore: 95,
+      recommendedAction: 'Patch Exchange Server, hunt for web shells, and review IIS/Exchange logs.'
+    },
+    'Log4Shell Exploit': {
+      severity: 'critical',
+      mitreTechnique: 'T1190',
+      confidence: 97,
+      riskScore: 97,
+      recommendedAction: 'Patch Log4j, block JNDI exploit strings, and hunt for outbound LDAP/RMI callbacks.'
+    },
     'Port Scan': {
       severity: 'medium',
       mitreTechnique: 'T1046',
@@ -291,6 +337,27 @@ function otherAttackRule(attackType) {
       confidence: 90,
       riskScore: 86,
       recommendedAction: 'Invalidate sessions, rotate credentials, and review identity provider logs.'
+    },
+    'Credential Stuffing': {
+      severity: 'high',
+      mitreTechnique: 'T1110',
+      confidence: 90,
+      riskScore: 84,
+      recommendedAction: 'Rate-limit authentication, enforce MFA, and block repeated credential attempts.'
+    },
+    'Password Spraying': {
+      severity: 'high',
+      mitreTechnique: 'T1110.003',
+      confidence: 90,
+      riskScore: 84,
+      recommendedAction: 'Lock suspicious sources, enforce MFA, and review account lockout telemetry.'
+    },
+    'PowerShell Abuse': {
+      severity: 'high',
+      mitreTechnique: 'T1059.001',
+      confidence: 88,
+      riskScore: 82,
+      recommendedAction: 'Constrain PowerShell, collect script block logs, and isolate affected hosts.'
     },
     'Data Exfiltration': {
       severity: 'high',
@@ -428,6 +495,8 @@ function incidentCorrelationTag(detection, log) {
 async function createOrUpdateIncident(log, detection, userId, settings = DEFAULT_PIPELINE_SETTINGS) {
   const severityEscalationEnabled = settings.incidentConfig?.severityEscalationEnabled !== false;
   const correlationTag = incidentCorrelationTag(detection, log);
+  const relatedCves = relatedCvesForAttack(log.attackType || detection.alert?.title || detection.alert?.message);
+  const cveLines = relatedCves.length ? [`Related CVEs: ${relatedCves.join(', ')}`] : [];
   const commonFields = {
     title: incidentTitleForAlert(detection.alert),
     description: [
@@ -437,6 +506,7 @@ async function createOrUpdateIncident(log, detection, userId, settings = DEFAULT
       `Target: ${log.targetSystem}`,
       `Severity: ${detection.alert.severity.toUpperCase()}`,
       `MITRE Technique: ${detection.alert.mitreTechnique}`,
+      ...cveLines,
       `Evidence: ${JSON.stringify(detection.alert.evidence)}`
     ].join('\n'),
     severity: detection.alert.severity,
@@ -446,6 +516,7 @@ async function createOrUpdateIncident(log, detection, userId, settings = DEFAULT
     affectedSystems: [log.targetSystem],
     createdBy: userId,
     relatedLogs: [log._id],
+    relatedCves,
     impact: detection.alert.severity,
     priority: detection.alert.severity,
     tags: [AUTO_INCIDENT_TAG, correlationTag, detection.id, log.attackType]

@@ -1301,6 +1301,31 @@ function exportAnalytics() {
 }
 
 // Update Analytics Stats
+function formatAnalyticsResponseTime(seconds) {
+    const value = Number(seconds) || 0;
+    if (value < 60) return `${Math.round(value)} sec`;
+    return `${(value / 60).toFixed(1)} min`;
+}
+
+function calculateAnalyticsRiskScore(logs) {
+    const total = logs.length;
+    if (!total) return 0;
+
+    const unblocked = logs.filter(log => !log.isBlocked).length;
+    const criticalHigh = logs.filter(log => ['critical', 'high'].includes(log.severity)).length;
+    const averageSeverity = logs.reduce((sum, log) => sum + severityWeight(log.severity), 0) / total;
+    const unblockedRate = (unblocked / total) * 100;
+    const criticalHighRate = (criticalHigh / total) * 100;
+    const volumePressure = Math.min(100, (total / 50) * 100);
+
+    return Math.round(
+        averageSeverity * 0.38 +
+        unblockedRate * 0.32 +
+        criticalHighRate * 0.22 +
+        volumePressure * 0.08
+    );
+}
+
 function updateAnalyticsStats() {
     const logs = getAnalyticsLogs();
     const total = logs.length;
@@ -1312,7 +1337,7 @@ function updateAnalyticsStats() {
     const stats = {
         detectionRate: total ? '100.0' : '0.0',
         preventionSuccess: total ? ((blocked / total) * 100).toFixed(1) : '0.0',
-        responseTime: total ? `${criticalHigh}` : '0',
+        responseTime: total ? formatAnalyticsResponseTime(criticalHigh) : '0 sec',
         aiConfidence: total ? String(Math.min(95, 45 + avgSeverity / 2).toFixed(1)) : '0.0'
     };
     
@@ -1324,8 +1349,7 @@ function updateAnalyticsStats() {
 
     const riskScore = document.getElementById('risk-score');
     if (riskScore) {
-        const activeRisk = logs.filter(log => !log.isBlocked).reduce((sum, log) => sum + severityWeight(log.severity), 0);
-        riskScore.textContent = total ? Math.min(100, Math.round((activeRisk / Math.max(total, 1)) + criticalHigh * 4)) : 0;
+        riskScore.textContent = `${calculateAnalyticsRiskScore(logs)}%`;
     }
 }
 

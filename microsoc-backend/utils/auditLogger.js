@@ -10,9 +10,19 @@ function pickActor(req) {
   };
 }
 
+function pickRequestIp(req) {
+  const forwardedFor = req?.headers?.['x-forwarded-for'];
+  const realIp = req?.headers?.['x-real-ip'];
+  const forwardedValue = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+  const firstForwardedIp = forwardedValue ? String(forwardedValue).split(',')[0].trim() : '';
+
+  return firstForwardedIp || realIp || req?.ip || req?.socket?.remoteAddress || '';
+}
+
 async function recordAuditEvent(req, event = {}) {
   try {
-    const hasReqUser = Boolean(req && req.user);
+    const forceSystemActor = Boolean(event.systemAction);
+    const hasReqUser = Boolean(req && req.user && !forceSystemActor);
     const actor = hasReqUser ? pickActor(req) : {
       actor: event.actor || null,
       actorName: event.actorName || 'System',
@@ -29,8 +39,8 @@ async function recordAuditEvent(req, event = {}) {
       targetLabel: event.targetLabel || '',
       result: event.result || 'success',
       details: event.details || event.action || 'Audit event recorded',
-      ipAddress: hasReqUser ? (req.ip || req.headers?.['x-forwarded-for'] || 'Unknown') : (event.ipAddress || 'Unknown'),
-      userAgent: hasReqUser ? (req.headers?.['user-agent'] || 'Unknown') : (event.userAgent || 'Unknown'),
+      ipAddress: hasReqUser ? pickRequestIp(req) : (event.ipAddress || ''),
+      userAgent: hasReqUser ? (req.headers?.['user-agent'] || '') : (event.userAgent || ''),
       metadata: event.metadata || {}
     };
 
@@ -43,5 +53,6 @@ async function recordAuditEvent(req, event = {}) {
 }
 
 module.exports = {
-  recordAuditEvent
+  recordAuditEvent,
+  pickRequestIp
 };

@@ -2,8 +2,29 @@ const Alert = require('../models/Alert');
 const Incident = require('../models/Incident');
 const SystemSettings = require('../models/SystemSettings');
 const realtimeHub = require('../utils/realtimeHub');
+const { recordAuditEvent } = require('../utils/auditLogger');
 
 const AUTO_INCIDENT_TAG = 'auto-alert-correlation';
+const DEFAULT_INCIDENT_THRESHOLD = 3;
+
+function relatedCvesForAttack(value = '') {
+  const key = String(value || '').toLowerCase();
+  if (key.includes('microsoft outlook exploit') || key.includes('outlook exploit')) return ['CVE-2023-23397'];
+  if (key.includes('apache struts exploit') || key.includes('struts exploit')) return ['CVE-2017-5638'];
+  if (key.includes('exchange server exploit') || key.includes('exchange exploit') || key.includes('proxylogon') || key.includes('proxyshell')) return ['CVE-2021-26855', 'CVE-2021-34473'];
+  if (key.includes('log4shell exploit') || key.includes('log4j exploit') || key.includes('log4shell')) return ['CVE-2021-44228'];
+  return [];
+}
+
+function isSystemGeneratedAlert(alert = {}) {
+  const source = String(alert.metadata?.source || alert.source || '').toLowerCase();
+  const tags = Array.isArray(alert.tags) ? alert.tags.map(tag => String(tag).toLowerCase()) : [];
+  return Boolean(alert.metadata?.systemGenerated)
+    || source.includes('live')
+    || source.includes('auto')
+    || tags.includes('auto-alert-correlation')
+    || tags.includes('system-generated');
+}
 
 function buildTimeWindow(timeRange = '24h') {
   const now = new Date();
@@ -100,8 +121,54 @@ function isIPv4(value) {
   return /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$/.test(String(value || ''));
 }
 
+function getAlertCorrelationScope(alert = {}) {
+  const attackType = String(alert.attackType || alert.title || '').toLowerCase();
+  const targetSystem = String(alert.targetSystem || '').trim();
+  const sourceIP = String(alert.sourceIP || '').trim();
+  const sourceScopedAttacks = [
+    'brute force',
+    'port scan',
+    'credential stuffing',
+    'password spraying'
+  ];
+  const targetScopedAttacks = [
+    'sql injection',
+    'xss',
+    'cross-site scripting',
+    'ddos',
+    'microsoft outlook exploit',
+    'outlook exploit',
+    'apache struts exploit',
+    'exchange server exploit',
+    'log4shell exploit',
+    'log4j exploit'
+  ];
+
+  if (targetScopedAttacks.some(type => attackType.includes(type)) && targetSystem) {
+    return {
+      field: 'targetSystem',
+      value: targetSystem,
+      label: attackType.includes('xss') || attackType.includes('cross-site scripting') ? 'web application/endpoint'
+        : attackType.includes('sql') ? 'API/endpoint'
+          : attackType.includes('outlook') ? 'mail server'
+            : attackType.includes('struts') ? 'web server'
+              : attackType.includes('exchange') ? 'Exchange server'
+                : 'target server/service'
+    };
+  }
+
+  if (sourceScopedAttacks.some(type => attackType.includes(type)) && sourceIP) {
+    return { field: 'sourceIP', value: sourceIP, label: 'source IP' };
+  }
+
+  if (targetSystem) return { field: 'targetSystem', value: targetSystem, label: 'target system' };
+  if (sourceIP) return { field: 'sourceIP', value: sourceIP, label: 'source IP' };
+  return { field: null, value: '', label: 'source or target' };
+}
+
 function buildSimilarityQuery(alert) {
   const ruleKey = alert.ruleId || alert.attackType || 'manual-alert';
+  const scope = getAlertCorrelationScope(alert);
   const query = {
     deletedAt: { $exists: false }
   };
@@ -114,17 +181,22 @@ function buildSimilarityQuery(alert) {
     query.attackType = alert.attackType;
   }
 
+  if (scope.field && scope.value) {
+    query[scope.field] = scope.value;
+  }
+
   return {
     query,
+    scope,
     ruleKey: sanitizeTag(ruleKey),
-    correlationTag: sanitizeTag(`${AUTO_INCIDENT_TAG}:${ruleKey}:${alert.attackType || 'attack'}`)
+    correlationTag: sanitizeTag(`${AUTO_INCIDENT_TAG}:${ruleKey}:${alert.attackType || 'attack'}:${scope.field || 'scope'}:${scope.value || 'any'}`)
   };
 }
 
-async function correlateAlertToIncident(alert, userId) {
+async function correlateAlertToIncident(alert, userId, req) {
   const settings = await SystemSettings.getSingleton();
-  const threshold = Math.max(1, Number(settings.incidentConfig?.createIncidentAfter) || 3);
-  const { query, ruleKey, correlationTag } = buildSimilarityQuery(alert);
+  const threshold = Math.max(1, Number(settings.incidentConfig?.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD);
+  const { query, scope, ruleKey, correlationTag } = buildSimilarityQuery(alert);
   const similarAlerts = await Alert.find(query).sort({ lastSeen: 1 });
 
   if (similarAlerts.length < threshold) {
@@ -151,7 +223,10 @@ async function correlateAlertToIncident(alert, userId) {
   let incident = await Incident.findOne(incidentQuery);
 
   const created = !incident;
-  const title = `Repeated ${alert.attackType || alert.ruleId || 'security'} alerts${sourceIP ? ` from ${sourceIP}` : ''}`;
+  const scopeText = scope.value ? `${scope.label} ${scope.value}` : 'matched source/target';
+  const title = `Repeated ${alert.attackType || alert.ruleId || 'security'} alerts for ${scopeText}`;
+  const relatedCves = relatedCvesForAttack(`${alert.attackType || ''} ${alert.title || ''} ${alert.description || ''}`);
+  const cveLines = relatedCves.length ? [`Related CVEs: ${relatedCves.join(', ')}`] : [];
 
   if (!incident) {
     incident = await Incident.create({
@@ -161,7 +236,10 @@ async function correlateAlertToIncident(alert, userId) {
         '',
         `Rule: ${alert.ruleId || 'N/A'}`,
         `Attack Type: ${alert.attackType || 'Unknown'}`,
+        `Correlation: same ${scope.label}${scope.value ? ` (${scope.value})` : ''}`,
+        ...cveLines,
         `Source IPs: ${sourceIPs.join(', ') || 'Unknown'}`,
+        `Affected Systems: ${affectedSystems.join(', ') || 'Unknown'}`,
         `Latest Alert: ${alert.title}`
       ].join('\n'),
       severity: highestSeverity,
@@ -171,6 +249,7 @@ async function correlateAlertToIncident(alert, userId) {
       affectedSystems,
       createdBy: userId,
       relatedLogs,
+      relatedCves,
       impact: highestSeverity,
       priority: highestSeverity,
       tags: [AUTO_INCIDENT_TAG, correlationTag, ruleKey, sanitizeTag(alert.attackType || 'alert')].filter(Boolean),
@@ -184,7 +263,7 @@ async function correlateAlertToIncident(alert, userId) {
     await incident.addTimelineEvent(
       'Auto-created from similar alerts',
       userId,
-      `${similarAlerts.length} alerts matched ${alert.ruleId || alert.attackType || 'rule'} from ${sourceIP}.`
+      `${similarAlerts.length} alerts matched ${alert.ruleId || alert.attackType || 'rule'} by same ${scope.label}${scope.value ? ` (${scope.value})` : ''}.`
     );
   } else {
     incident.severity = highestSeverity;
@@ -222,6 +301,25 @@ async function correlateAlertToIncident(alert, userId) {
       incidentCreated: created
     }
   });
+
+  if (req) {
+    await recordAuditEvent(req, {
+      systemAction: true,
+      action: created ? 'Auto Incident Created' : 'Auto Incident Updated',
+      module: 'incidents',
+      targetType: 'Incident',
+      targetId: String(populatedIncident._id),
+      targetLabel: populatedIncident.title,
+      details: `${created ? 'Created' : 'Updated'} incident from correlated ${alert.attackType || 'security'} alerts`,
+      metadata: {
+        alertId: String(alert._id || alert.id || ''),
+        attackType: alert.attackType,
+        similarAlertCount: similarAlerts.length,
+        threshold,
+        correlation: scope
+      }
+    });
+  }
 
   return { created, incident: populatedIncident, similarAlertCount: similarAlerts.length, threshold };
 }
@@ -334,7 +432,26 @@ exports.createAlert = async (req, res) => {
       status: req.body.status || 'new'
     });
 
-    const incidentResult = await correlateAlertToIncident(alert, req.user.id);
+    const systemGenerated = isSystemGeneratedAlert(alert);
+    await recordAuditEvent(req, {
+      systemAction: systemGenerated,
+      action: systemGenerated ? 'Alert Auto Generated' : 'Alert Created',
+      module: 'alerts',
+      targetType: 'Alert',
+      targetId: String(alert._id),
+      targetLabel: alert.title,
+      details: `${systemGenerated ? 'Auto-generated' : 'Created'} alert "${alert.title}"`,
+      metadata: {
+        severity: alert.severity,
+        status: alert.status,
+        attackType: alert.attackType,
+        sourceIP: alert.sourceIP,
+        targetSystem: alert.targetSystem,
+        source: alert.metadata?.source || 'manual'
+      }
+    });
+
+    const incidentResult = await correlateAlertToIncident(alert, req.user.id, req);
     const populatedAlert = await Alert.findById(alert._id)
       .populate('incident', 'title status severity')
       .populate('log', 'timestamp attackType sourceIP severity');
