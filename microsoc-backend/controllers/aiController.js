@@ -154,10 +154,61 @@ function fallbackReport(payload = {}) {
   };
 }
 
+function getChatIntent(message = '') {
+  const text = String(message || '').trim().toLowerCase();
+  if (/^(hi|hello|hey|hii|hy|namaste|good morning|good afternoon|good evening)\b/i.test(text)) return 'greeting';
+  if (/^(how are you|how r u|how's it going|are you ok|kaise ho|kese ho|kya haal)\b/i.test(text)) return 'wellbeing';
+  if (text.includes('i asked') && text.includes('how are you')) return 'wellbeing';
+  if (text.includes('who are you') || text.includes('what are you')) return 'assistant_identity';
+  if (
+    text.includes('do you know me')
+    || text.includes('who am i')
+    || text.includes('you know me')
+    || text.includes('mera naam')
+    || text.includes('my name')
+  ) return 'user_identity';
+  if (text.includes('what can you do') || text.includes('help me') || text === 'help') return 'capabilities';
+  if (text.includes('thank')) return 'thanks';
+  if (/^(bye|goodbye|see you|ok bye)\b/i.test(text)) return 'goodbye';
+  return 'soc';
+}
+
+function isLocalChatIntent(message = '') {
+  return getChatIntent(message) !== 'soc';
+}
+
 function fallbackChat(message = '', context = {}) {
   const normalized = String(message).toLowerCase();
   const recentAlerts = context.recentAlerts || [];
   const openIncidents = context.openIncidents || [];
+  const user = context.user && typeof context.user === 'object' ? context.user : {};
+  const userName = user.name || user.email || '';
+  const userRole = user.role ? String(user.role).toUpperCase() : '';
+  const intent = getChatIntent(message);
+  if (intent === 'greeting') {
+    return 'Hey! I am here and ready to help. What would you like to check in MicroSOC?';
+  }
+  if (intent === 'wellbeing') {
+    return 'I am doing well and ready to help. Ask me anything about your MicroSOC alerts, incidents, logs, MITRE mapping, CVEs, or mitigation steps.';
+  }
+  if (intent === 'assistant_identity') {
+    return 'I am MicroSOC AI, the built-in SOC assistant for this command center. I can help with alert triage, incident prioritization, MITRE/CVE context, and remediation planning.';
+  }
+  if (intent === 'user_identity') {
+    if (userName) {
+      return `Yes. In this session, I can see you as ${userName}${userRole ? ` with ${userRole} access` : ''}. I only know what the MicroSOC session provides, not anything outside this app.`;
+    }
+    return 'I can only know you from the current MicroSOC login session. Right now I cannot see a user name in the session context.';
+  }
+  if (intent === 'capabilities') {
+    return 'I can summarize alerts, explain attacks, map MITRE techniques, identify related CVEs, suggest mitigations, prioritize incidents, and help interpret suspicious IPs or IOCs.';
+  }
+  if (intent === 'thanks') {
+    return 'You are welcome. Send me any alert, incident, IOC, CVE, or attack type and I will help break it down clearly.';
+  }
+  if (intent === 'goodbye') {
+    return 'Bye. I will be here when you want to investigate the next alert or incident.';
+  }
   if (normalized.includes('summarize') && (normalized.includes('alert') || normalized.includes('log'))) {
     const criticalHigh = recentAlerts.filter(alert => ['critical', 'high'].includes(alert.severity)).length;
     const topTypes = [...new Set(recentAlerts.map(alert => alert.attackType).filter(Boolean))].slice(0, 4);
@@ -184,16 +235,18 @@ function fallbackChat(message = '', context = {}) {
   if (normalized.includes('password') || normalized.includes('approval')) {
     return 'Account approvals and password resets should stay admin-controlled. Check pending users first, approve only known analysts, and keep OTP expiry short.';
   }
-  return `I reviewed the available MicroSOC context (${Object.keys(context || {}).join(', ') || 'no extra context'}). Recommended next step: triage open critical/high incidents, inspect related logs, and apply temporary containment before permanent remediation.`;
+  return 'I can help with MicroSOC alerts, incidents, logs, MITRE mapping, CVE context, IOC analysis, or mitigation steps. Ask me something like "summarize alerts", "explain this attack", or "what should I prioritize first?".';
 }
 
 function fallbackChatPayload(message = '', context = {}) {
   const answer = fallbackChat(message, context);
-  const nextActions = [
-    'Review the latest critical/high alerts',
-    'Inspect related logs and incident timelines',
-    'Apply temporary containment if the source is repeated'
-  ];
+  const nextActions = isLocalChatIntent(message)
+    ? []
+    : [
+        'Review the latest critical/high alerts',
+        'Inspect related logs and incident timelines',
+        'Apply temporary containment if the source is repeated'
+      ];
 
   return normalizeChatData({ answer, nextActions }, { answer, nextActions });
 }
@@ -543,6 +596,21 @@ exports.generateReport = async (req, res) => {
 
 exports.chat = async (req, res) => {
   const message = req.body.message || '';
+  const localFirstAnswer = fallbackChat(message, req.body.context || {});
+  const shouldAnswerLocally = isLocalChatIntent(message);
+
+  if (shouldAnswerLocally) {
+    res.json({
+      success: true,
+      mode: 'local',
+      data: normalizeChatData({
+        answer: localFirstAnswer,
+        nextActions: []
+      })
+    });
+    return;
+  }
+
   const recentAlerts = await Log.find()
     .sort({ timestamp: -1 })
     .limit(20)
@@ -569,7 +637,9 @@ exports.chat = async (req, res) => {
       [
         'You are MicroSOC AI, the built-in SOC assistant for MicroSOC Command Center.',
         'Identity rule: if asked who you are, say you are MicroSOC AI. Never claim to be an animal, owl, generic chatbot, or unrelated persona.',
-        'Scope: answer practical security operations questions with concise next actions. You can explain attacks, summarize recent alerts, suggest mitigations, assess severity, and reference MITRE-style techniques.',
+        'Respond naturally. If the user asks casual small-talk, answer casually without forcing SOC triage.',
+        'For security operations questions, give practical next actions. You can explain attacks, summarize recent alerts, suggest mitigations, assess severity, and reference MITRE-style techniques.',
+        'If asked about the logged-in user, use context.user when available and do not invent personal details.',
         'Use JSON with answer and nextActions. Keep answer under 120 words unless the user asks for detail.'
       ].join(' '),
       payload
@@ -578,22 +648,13 @@ exports.chat = async (req, res) => {
     result.data = normalizeChatData(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
-    if (AI_ALLOW_LOCAL_FALLBACK) {
-      const fallback = fallbackChatPayload(message, payload.context);
-      console.warn('AI chat provider failed, using fallback:', error.message);
-      res.json({
-        success: true,
-        mode: 'fallback',
-        data: fallback,
-        providerError: error.message
-      });
-      return;
-    }
-    res.status(502).json({
-      success: false,
-      mode: 'ai_error',
-      message: 'AI provider rejected the request',
-      detail: error.message
+    const fallback = fallbackChatPayload(message, payload.context);
+    console.warn('AI chat provider failed, using fallback:', error.message);
+    res.json({
+      success: true,
+      mode: 'fallback',
+      data: fallback,
+      providerError: error.message
     });
   }
 };

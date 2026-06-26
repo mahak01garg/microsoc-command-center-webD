@@ -332,6 +332,84 @@ If a field is not available, the UI hides it instead of showing noisy values lik
 | Analyst | Investigation-focused access with limited admin controls hidden |
 | Viewer | Read-oriented access where applicable |
 
+## Admin vs Analyst Access Flow
+
+The project uses role-based access at two levels:
+
+- Frontend: hides routes, buttons, and admin-only actions from analysts.
+- Backend: protects sensitive API endpoints with role checks.
+
+### Sidebar Access
+
+| Page | Admin | Analyst |
+| --- | --- | --- |
+| Dashboard | Yes | Yes |
+| Security Logs | Yes | Yes, view-focused |
+| Alerts | Yes | Yes, investigation-focused |
+| Incidents | Yes | Yes, limited workflow |
+| Analytics | Yes | Yes |
+| Audit Logs | Yes | No |
+| User Management | Yes | No |
+| Settings | Yes | No |
+
+### Action Access Matrix
+
+| Feature / Action | Admin | Analyst |
+| --- | --- | --- |
+| View dashboard metrics | Yes | Yes |
+| View security logs | Yes | Yes |
+| Start live stream | Yes | Yes, if visible in current view |
+| Generate mock logs | Yes | No |
+| Create log manually | Yes | No |
+| Archive logs | Yes | No |
+| Export logs | Yes | No |
+| View alerts | Yes | Yes |
+| Investigate alerts | Yes | Yes |
+| Resolve alerts | Yes | No |
+| Archive alerts | Yes | No |
+| Create alerts from logs | Yes | No |
+| View incidents | Yes | Yes |
+| Create incidents | Yes | No |
+| Edit incidents | Yes | No |
+| Assign incidents | Yes | No |
+| Add admin remediation steps | Yes | No |
+| Add analyst note/update where allowed | Yes | Limited |
+| View audit logs | Yes | No |
+| View user management | Yes | No |
+| Update SOC settings | Yes | No |
+| Change AI/notification settings | Yes | No |
+
+### Frontend Role Behavior
+
+When the logged-in user is an admin, the sidebar shows:
+
+```text
+Dashboard -> Security Logs -> Alerts -> Incidents -> Analytics -> Audit Logs -> User Management -> Settings
+```
+
+When the logged-in user is an analyst, the sidebar shows:
+
+```text
+Dashboard -> Security Logs -> Alerts -> Incidents -> Analytics
+```
+
+Admin-only controls such as archive, delete, export, generate, create incident, user management, audit logs, and settings are hidden for analysts.
+
+### Backend Protected Routes
+
+Sensitive routes are protected using admin-only authorization.
+
+| Backend Area | Admin-only Operations |
+| --- | --- |
+| `/api/settings` | Read/update SOC settings |
+| `/api/audit-logs` | View audit history |
+| `/api/users` | User management and approvals |
+| `/api/logs` | Create, update, archive/delete, bulk create, generate mock logs, export |
+| `/api/alerts` | Create, update, bulk update, archive |
+| `/api/incidents` | Create, update, archive/delete, assign, remediation |
+
+Analysts can still use the product meaningfully, but their experience is focused on triage and investigation rather than system administration.
+
 The backend syncs authorized admin accounts on startup. Demo/admin emails are available from:
 
 ```text
@@ -579,26 +657,45 @@ Detailed incident rule logic is documented in this README instead of the Setting
 
 The dashboard security score is a derived presentation metric. It is meant to summarize security posture, not replace a real enterprise risk model.
 
-Recommended interpretation:
+Current dashboard implementation:
 
 ```text
-Security Score = 100
-                 - Critical Threat Penalty
-                 - Active Incident Penalty
-                 - Unresolved Alert Penalty
-                 + Blocked Attack Credit
+severityTotal = criticalLogs + highLogs + mediumLogs
+
+logPressure =
+  (criticalLogs / severityTotal * 45)
+  + (highLogs / severityTotal * 25)
+  + (mediumLogs / severityTotal * 12)
+
+responsePressure = 0
+
+resilienceBonus =
+  min(15, blockedPercentage / 7)
+  + min(10, uniqueSources / 20)
+
+totalThreatSignals =
+  totalLogs + blockedAttacks + uniqueSources
+
+securityScore =
+  clamp(
+    92 - logPressure - responsePressure + resilienceBonus + activityBonus,
+    minimum = totalThreatSignals > 0 ? 20 : 45,
+    maximum = 100
+  )
+
+activityBonus = 4 when threat signals exist, otherwise 0
 ```
 
-Example:
+In simple words:
 
 ```text
-Critical threats increase risk.
-Open incidents reduce confidence.
-Unresolved alerts reduce confidence.
-Blocked attacks improve prevention confidence.
+More critical/high/medium logs reduce the score.
+Higher blocked attack percentage improves the score.
+More unique sources add a small resilience/context bonus.
+If there is no telemetry yet, the score does not pretend to be perfect.
 ```
 
-This makes the number explainable for a recruiter/demo instead of looking random.
+The score is capped at 100 and has a minimum floor so the dashboard remains readable during demos. It is a presentation metric for SOC posture, not a certified enterprise risk score.
 
 ## Archive Strategy
 

@@ -427,7 +427,10 @@
                 thinking.textContent = `${answer}${nextActions}`;
             } catch (error) {
                 console.error('AI assistant failed:', error);
-                thinking.textContent = error.message || 'MicroSOC AI could not respond right now.';
+                const message = String(error.message || '').toLowerCase();
+                thinking.textContent = message.includes('provider rejected')
+                    ? 'I am ready to help, but the external AI provider rejected that request. Try asking again, or ask me to summarize alerts, explain an attack, or suggest mitigation steps.'
+                    : (error.message || 'MicroSOC AI could not respond right now.');
             }
         });
     }
