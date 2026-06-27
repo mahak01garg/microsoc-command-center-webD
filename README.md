@@ -24,7 +24,7 @@ MicroSOC helps an analyst/admin monitor and investigate security events through:
 - Audit logs for admin and system actions
 - Archive support for logs, alerts, and incidents
 - Dashboard metrics, analytics, attack map, and system health
-- Optional AI-assisted summaries and recommendations
+- LLM-powered SOC assistant for reports, chat, triage, and recommendations
 
 ## Tech Stack
 
@@ -37,7 +37,7 @@ MicroSOC helps an analyst/admin monitor and investigate security events through:
 | Auth | JWT, bcrypt |
 | Realtime | WebSocket/SSE style threat feed support |
 | Security helpers | Helmet, CORS, role-based access checks |
-| AI integration | OpenAI/OpenRouter or Gemini-compatible configuration |
+| LLM / AI integration | OpenRouter/OpenAI-compatible or Gemini-compatible API configuration |
 | Email integration | SendGrid for approval/reset flows |
 | Deployment | Frontend on Vercel, backend on Render, database on MongoDB Atlas |
 
@@ -404,6 +404,21 @@ Output includes:
 - Known activity
 - Threat score
 - Recommendation
+
+## LLM-Powered SOC Assistant
+
+MicroSOC integrates an LLM-powered assistant through OpenRouter/OpenAI-compatible or Gemini-compatible APIs.
+
+The LLM is used for:
+
+- AI chat inside the command center
+- Analytics SOC report generation
+- Alert and log explanation
+- Incident triage summaries
+- Recommended actions and investigation guidance
+- Natural-language SOC search support
+
+The project does not train a custom language model. It integrates an external LLM provider API and sends redacted/summarized SOC context so the model can return analyst-friendly JSON responses.
 
 ## Audit Logging
 
