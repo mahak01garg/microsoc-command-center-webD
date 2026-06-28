@@ -48,8 +48,7 @@ function getStoredSecurityLogs() {
 
 function getAnalyticsAuthHeaders() {
     return {
-        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
-        'Cache-Control': 'no-cache'
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
     };
 }
 
@@ -111,7 +110,7 @@ function syncAnalyticsLogsFromStorage() {
 }
 
 async function fetchAnalyticsLogsFromBackend() {
-    const firstUrl = `${getApiBaseUrl()}/logs?limit=5000&page=1&timeRange=all&sortBy=timestamp&sortOrder=desc&_=${Date.now()}`;
+    const firstUrl = `${getApiBaseUrl()}/logs?limit=300&page=1&timeRange=all&sortBy=timestamp&sortOrder=desc&_=${Date.now()}`;
     const firstResponse = await fetch(firstUrl, {
         headers: getAnalyticsAuthHeaders(),
         cache: 'no-store'
@@ -121,23 +120,7 @@ async function fetchAnalyticsLogsFromBackend() {
         throw new Error(firstPayload.message || 'Could not load analytics logs');
     }
 
-    const logs = Array.isArray(firstPayload.logs) ? [...firstPayload.logs] : [];
-    const totalPages = Math.max(1, Number(firstPayload.totalPages) || 1);
-
-    if (totalPages > 1) {
-        const remainingPages = Array.from({ length: totalPages - 1 }, (_, index) => index + 2);
-        const pages = await Promise.all(remainingPages.map(async (page) => {
-            const response = await fetch(`${getApiBaseUrl()}/logs?limit=5000&page=${page}&timeRange=all&sortBy=timestamp&sortOrder=desc&_=${Date.now()}`, {
-                headers: getAnalyticsAuthHeaders(),
-                cache: 'no-store'
-            });
-            const payload = await response.json();
-            return response.ok && payload.success && Array.isArray(payload.logs) ? payload.logs : [];
-        }));
-        pages.forEach(pageLogs => logs.push(...pageLogs));
-    }
-
-    return logs.map(normalizeAnalyticsLog);
+    return (Array.isArray(firstPayload.logs) ? firstPayload.logs : []).map(normalizeAnalyticsLog);
 }
 
 async function hydrateAnalyticsLogs() {

@@ -14,7 +14,6 @@ let liveAttackScenario = null;
 let liveAttackScenarioCursor = 0;
 let liveStreamGeneration = 0;
 let pendingLiveLogs = [];
-let lastLiveNotificationAt = 0;
 let autoConvertedLiveLogIds = new Set();
 let autoAlertCorrelationState = {};
 let currentPage = 1;
@@ -27,11 +26,11 @@ const ARCHIVED_LOG_IDS_KEY = 'microsocArchivedLogIds';
 const ARCHIVED_LOGS_KEY = 'microsocArchivedLogs';
 const ALERT_CORRELATION_CACHE_KEY = 'microsocAlertCorrelationCache';
 const MAX_STORED_LOGS = 1000;
+const LOG_SYNC_LIMIT = 300;
 const MAX_ALERT_CORRELATION_CACHE = 1000;
 const LIVE_STREAM_INTERVAL_MS = 3000;
 const LIVE_STREAM_FIRST_DELAY_MS = 1200;
 const LIVE_RENDER_DEBOUNCE_MS = 250;
-const LIVE_NOTIFICATION_MIN_GAP_MS = 9000;
 const LIVE_STREAM_STATE_KEY = 'microsocLiveStreamState';
 const LIVE_STREAM_TAB_ID_KEY = 'microsocLiveStreamTabId';
 const DEFAULT_INCIDENT_THRESHOLD = 3;
@@ -234,6 +233,11 @@ function loadStoredLogs() {
     }
 }
 
+function getStoredLogTotal() {
+    const storedTotal = Number(localStorage.getItem(LOG_TOTAL_COUNT_KEY) || 0);
+    return Number.isFinite(storedTotal) && storedTotal > 0 ? storedTotal : 0;
+}
+
 function getDeletedLogIds() {
     try {
         const ids = JSON.parse(localStorage.getItem(DELETED_LOG_IDS_KEY) || '[]');
@@ -284,10 +288,14 @@ function filterArchivedLogs(logs) {
     return (Array.isArray(logs) ? logs : []).filter(log => !archivedIds.has(getLogId(log)) && log.archived !== true);
 }
 
-function saveStoredLogs() {
+function saveStoredLogs(totalOverride = null) {
     const sortedLogs = filterArchivedLogs(filterDeletedLogs([...allLogs])).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     allLogs = sortedLogs;
-    localStorage.setItem(LOG_TOTAL_COUNT_KEY, String(sortedLogs.length));
+    const explicitTotal = Number(totalOverride);
+    const nextTotal = totalOverride !== null && totalOverride !== undefined && Number.isFinite(explicitTotal)
+        ? Math.max(0, explicitTotal)
+        : Math.max(getStoredLogTotal(), sortedLogs.length);
+    localStorage.setItem(LOG_TOTAL_COUNT_KEY, String(nextTotal));
     localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(sortedLogs.slice(0, MAX_STORED_LOGS)));
     window.dispatchEvent(new CustomEvent('microsoc:logs-updated', { detail: { logs: allLogs } }));
 }
@@ -652,7 +660,7 @@ function renderLogs() {
 // Update Log Statistics
 function updateLogStats() {
     const statsLogs = allLogs.length ? allLogs : (filteredLogs.length ? filteredLogs : currentLogs);
-    const totalLogs = statsLogs.length;
+    const totalLogs = Math.max(getStoredLogTotal(), statsLogs.length);
     const criticalLogs = statsLogs.filter(log => String(log.severity || '').toLowerCase() === 'critical').length;
     const blockedAttacks = statsLogs.filter(log => log.isBlocked).length;
     const uniqueSources = new Set(
@@ -703,7 +711,7 @@ function buildLogApiQuery(options = {}) {
     const includeFilters = options.includeFilters !== false;
     const params = new URLSearchParams();
     params.set('page', '1');
-    params.set('limit', '5000');
+    params.set('limit', String(LOG_SYNC_LIMIT));
     params.set('timeRange', includeFilters ? (document.getElementById('filter-time')?.value || 'all') : 'all');
 
     if (!includeFilters) {
@@ -740,7 +748,7 @@ async function refreshLogsFromApi() {
         }
 
         allLogs = filterDeletedLogs(mergeLogs(payload.logs || [], loadStoredLogs()));
-        saveStoredLogs();
+        saveStoredLogs(payload.total);
         filterLogs({ skipApi: true });
     } catch (error) {
         console.warn('Log history sync failed:', error);
@@ -758,7 +766,9 @@ function queueLogsApiRefresh() {
 
 async function persistLiveLogsToBackend(logs) {
     const token = localStorage.getItem('token') || '';
-    if (!token || !Array.isArray(logs) || logs.length === 0) return [];
+    if (!token || !Array.isArray(logs) || logs.length === 0) {
+        return { logs: [], pipeline: null };
+    }
 
     const response = await fetch(`${getApiBaseUrl()}/logs/bulk`, {
         method: 'POST',
@@ -787,7 +797,10 @@ async function persistLiveLogsToBackend(logs) {
         throw new Error(payload.message || 'Failed to sync live logs');
     }
 
-    return Array.isArray(payload.logs) ? payload.logs : [];
+    return {
+        logs: Array.isArray(payload.logs) ? payload.logs : [],
+        pipeline: payload.pipeline || null
+    };
 }
 
 async function deleteLogsFromBackend(ids) {
@@ -1121,9 +1134,8 @@ async function getAlertThresholdSettings() {
 
 function getAlertThresholdForLog(log, settings) {
     const attackType = String(log?.attackType || '').toLowerCase();
-    return attackType.includes('brute force')
-        ? settings.failedLoginThreshold
-        : settings.otherAlertsThreshold;
+    if (attackType.includes('brute force')) return settings.failedLoginThreshold;
+    return settings.otherAlertsThreshold;
 }
 
 function getLiveAlertCorrelationKey(log) {
@@ -1140,9 +1152,7 @@ function buildLiveAttackScenario(settings = DEFAULT_LIVE_STREAM_SETTINGS) {
     const countries = ['USA', 'China', 'Russia', 'Germany', 'India', 'Brazil'];
     const attackType = LIVE_ATTACK_SCENARIO_TYPES[liveAttackScenarioCursor % LIVE_ATTACK_SCENARIO_TYPES.length];
     liveAttackScenarioCursor += 1;
-    const alertThreshold = attackType === 'Brute Force'
-        ? settings.failedLoginThreshold
-        : settings.otherAlertsThreshold;
+    const alertThreshold = getAlertThresholdForLog({ attackType }, settings);
     const burstTarget = Math.max(
         1,
         Number(settings.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD,
@@ -1171,38 +1181,82 @@ async function maybePromoteLiveLogToAlert(logsToMerge) {
     return null;
 }
 
+function showLiveLogNotification(log) {
+    if (!log) return;
+    const severity = String(log.severity || 'medium').toLowerCase();
+    const notificationType = ['critical', 'high'].includes(severity) ? 'error' : 'warning';
+    showNotification(`${severity.toUpperCase()} ${log.attackType || 'Attack'} from ${log.sourceIP || 'unknown source'}`, notificationType, {
+        title: log.isBlocked ? 'Attack Detected and Blocked' : 'Active Attack Detected',
+        meta: `${log.targetSystem || 'Unknown target'} | ${log.protocol || 'TCP'}/${log.port || '-'} | ${log.country || 'Unknown'}`
+    });
+}
+
+function showLivePipelineNotifications(pipeline = {}) {
+    const alerts = Array.isArray(pipeline.alerts) ? pipeline.alerts : [];
+    const incidents = Array.isArray(pipeline.incidents) ? pipeline.incidents : [];
+    const detectionCount = Number(pipeline.detections || 0);
+
+    if (alerts.length) {
+        alerts.forEach(alert => {
+            const severity = String(alert.severity || 'medium').toLowerCase();
+            showNotification(alert.title || `${severity.toUpperCase()} alert generated`, ['critical', 'high'].includes(severity) ? 'error' : 'warning', {
+                title: 'Alert Generated',
+                meta: `${alert.sourceIP || 'unknown source'} -> ${alert.targetSystem || 'unknown target'}`
+            });
+        });
+        updateAlertCount(alerts.length);
+    } else if (detectionCount > 0) {
+        showNotification(`${detectionCount} alert${detectionCount === 1 ? '' : 's'} generated from live stream`, 'warning', {
+            title: 'Alert Generated',
+            meta: 'Threat pipeline matched live log activity'
+        });
+        updateAlertCount(detectionCount);
+    }
+
+    incidents.forEach(incident => {
+        showNotification(incident.title || 'Live stream incident correlation updated', incident.created ? 'error' : 'warning', {
+            title: incident.created ? 'Incident Created' : 'Incident Updated',
+            meta: incident.incidentId ? `Incident ${incident.incidentId}` : 'Incident correlation'
+        });
+    });
+
+    const createdIncidentCount = incidents.filter(incident => incident.created).length;
+    if (createdIncidentCount > 0) {
+        updateIncidentCount(createdIncidentCount);
+    }
+}
+
 function flushLiveLogs(generation = liveStreamGeneration) {
     if (!isLiveStreaming || generation !== liveStreamGeneration || pendingLiveLogs.length === 0) return;
 
     const newLogs = pendingLiveLogs.splice(0);
     persistLiveLogsToBackend(newLogs)
-        .then(async (savedLogs) => {
+        .then(async (syncResult) => {
             if (!isLiveStreaming || generation !== liveStreamGeneration) return;
+            const savedLogs = Array.isArray(syncResult?.logs) ? syncResult.logs : [];
             const logsToMerge = savedLogs.length ? savedLogs : newLogs;
+            const previousTotal = getStoredLogTotal();
+            const previousLogIds = new Set(allLogs.map(getLogId));
+            const newUniqueCount = logsToMerge.filter(log => !previousLogIds.has(getLogId(log))).length;
             allLogs = mergeLogs(logsToMerge, allLogs);
-            saveStoredLogs();
+            saveStoredLogs(Math.max(previousTotal + newUniqueCount, allLogs.length));
             syncFilteredLogs();
             updateLogStats();
 
-            const notableLog = logsToMerge.find(log => ['critical', 'high'].includes(log.severity)) || logsToMerge[0];
-            const now = Date.now();
-            if (notableLog && now - lastLiveNotificationAt > LIVE_NOTIFICATION_MIN_GAP_MS) {
-                lastLiveNotificationAt = now;
-                const notificationType = ['critical', 'high'].includes(notableLog.severity) ? 'error' : 'warning';
-                showNotification(`${notableLog.severity.toUpperCase()} ${notableLog.attackType} from ${notableLog.sourceIP}`, notificationType, {
-                    title: notableLog.isBlocked ? 'Attack Detected and Blocked' : 'Active Attack Detected',
-                    meta: `${notableLog.targetSystem} | ${notableLog.protocol}/${notableLog.port} | ${notableLog.country}`
-                });
-            }
-
+            logsToMerge.forEach(showLiveLogNotification);
+            showLivePipelineNotifications(syncResult?.pipeline || {});
         })
         .catch((error) => {
             if (!isLiveStreaming || generation !== liveStreamGeneration) return;
             console.warn('Live log sync failed, keeping local copy only:', error);
+            const previousTotal = getStoredLogTotal();
+            const previousLogIds = new Set(allLogs.map(getLogId));
+            const newUniqueCount = newLogs.filter(log => !previousLogIds.has(getLogId(log))).length;
             allLogs = mergeLogs(newLogs, allLogs);
-            saveStoredLogs();
+            saveStoredLogs(Math.max(previousTotal + newUniqueCount, allLogs.length));
             syncFilteredLogs();
             updateLogStats();
+            newLogs.forEach(showLiveLogNotification);
         });
 }
 
@@ -1914,8 +1968,7 @@ async function ensureIncidentForSimilarAlerts(alert, result = {}) {
     try {
         const response = await fetch(`${getApiBaseUrl()}/alerts/recent?limit=500&timeRange=all`, {
             headers: {
-                'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
-                'Cache-Control': 'no-cache'
+                'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
             },
             cache: 'no-store'
         });

@@ -4,14 +4,23 @@ const Incident = require('../models/Incident');
 const SystemSettings = require('../models/SystemSettings');
 
 const AI_PROVIDER = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : 'openai')).toLowerCase();
-const AI_BASE_URL = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
-const IS_OPENROUTER = AI_BASE_URL.includes('openrouter.ai');
-const AI_MODEL = process.env.AI_MODEL || (AI_PROVIDER === 'gemini' ? 'gemini-2.0-flash' : 'gpt-4o-mini');
+const DEFAULT_AI_BASE_URL = AI_PROVIDER === 'openrouter'
+  ? 'https://openrouter.ai/api/v1'
+  : 'https://api.openai.com/v1';
+const AI_BASE_URL = (
+  process.env.AI_BASE_URL
+  || (AI_PROVIDER === 'openrouter' ? process.env.OPENROUTER_BASE_URL : '')
+  || DEFAULT_AI_BASE_URL
+).replace(/\/$/, '');
+const IS_OPENROUTER = AI_PROVIDER === 'openrouter' || AI_BASE_URL.includes('openrouter.ai');
+const AI_MODEL = process.env.AI_MODEL
+  || (AI_PROVIDER === 'openrouter' ? process.env.OPENROUTER_MODEL : '')
+  || (AI_PROVIDER === 'gemini' ? 'gemini-2.0-flash' : 'gpt-4o-mini');
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_BASE_URL = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
-const AI_REQUIRE_PROVIDER = true;
-const AI_ALLOW_LOCAL_FALLBACK = false;
+const AI_REQUIRE_PROVIDER = String(process.env.AI_REQUIRE_PROVIDER || 'true').toLowerCase() !== 'false';
+const AI_ALLOW_LOCAL_FALLBACK = String(process.env.AI_ALLOW_LOCAL_FALLBACK || 'false').toLowerCase() === 'true';
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 15000);
 const AI_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 450);
 const AI_FORCE_RESPONSE_FORMAT = !IS_OPENROUTER
@@ -307,13 +316,39 @@ function parseAiJson(content) {
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/, '')
     .trim();
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) throw error;
-    return JSON.parse(match[0]);
+  const candidates = [text];
+  const match = text.match(/\{[\s\S]*\}/);
+  if (match) candidates.push(match[0]);
+
+  for (const candidate of candidates) {
+    const parsed = tryParseJson(candidate);
+    if (parsed) return parsed;
+
+    const repaired = repairAiJson(candidate);
+    const repairedParsed = tryParseJson(repaired);
+    if (repairedParsed) return repairedParsed;
   }
+
+  throw new Error('AI provider returned malformed JSON that could not be repaired.');
+}
+
+function tryParseJson(value) {
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return null;
+  }
+}
+
+function repairAiJson(value) {
+  return String(value || '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/,\s*([}\]])/g, '$1')
+    .replace(/"\s*\n\s*"/g, '",\n"')
+    .replace(/}\s*\n\s*"/g, '},\n"')
+    .replace(/]\s*\n\s*"/g, '],\n"')
+    .replace(/(\d)\s*\n\s*"/g, '$1,\n"');
 }
 
 function normalizeStringArray(value) {
@@ -598,9 +633,10 @@ exports.generateReport = async (req, res) => {
     const result = await callAiJson(
       [
         'You are a SOC reporting assistant.',
-        'Generate an executive-ready JSON report with title, riskScore, confidence, summary, keyFindings, recommendedActions, and watchlist.',
+        'Return one valid JSON object only with exactly these keys: title, riskScore, confidence, summary, keyFindings, recommendedActions, watchlist.',
+        'keyFindings, recommendedActions, and watchlist must be arrays of short strings. Do not use nested objects inside arrays.',
         'The user may send summarized telemetry instead of raw logs. Use the provided counts, top attack types, top sources, critical samples, anomalies, predictions, and remediations.',
-        'Do not say that raw logs are missing if summarized telemetry is available.'
+        'Do not say that raw logs are missing if summarized telemetry is available. Do not add trailing commas.'
       ].join(' '),
       req.body
     );
@@ -673,6 +709,21 @@ exports.chat = async (req, res) => {
     result.data = normalizeChatData(result.data);
     res.json({ success: true, ...result });
   } catch (error) {
+    if (AI_ALLOW_LOCAL_FALLBACK) {
+      const fallbackAnswer = fallbackChat(message, payload.context);
+      const fallback = normalizeChatData(
+        { answer: fallbackAnswer },
+        { answer: fallbackAnswer, nextActions: [] }
+      );
+      console.warn('AI chat provider failed, using fallback:', error.message);
+      res.json({
+        success: true,
+        mode: 'fallback',
+        data: fallback,
+        providerError: error.message
+      });
+      return;
+    }
     res.status(502).json({
       success: false,
       mode: 'ai_error',

@@ -30,7 +30,6 @@ function isSystemGeneratedIncident(incident = {}) {
 // @access  Private
 exports.getIncidents = async (req, res) => {
   try {
-    const incidentCorrelation = await correlateExistingAlertsToIncidents(req.user?.id, req, { limit: 1000 });
     const {
       page = 1,
       limit = 20,
@@ -114,9 +113,9 @@ exports.getIncidents = async (req, res) => {
       incidents,
       stats,
       incidentCorrelation: {
-        createdCount: incidentCorrelation.filter(item => item.created).length,
-        linkedCount: incidentCorrelation.length,
-        incidents: incidentCorrelation
+        createdCount: 0,
+        linkedCount: 0,
+        incidents: []
       }
     });
   } catch (error) {
@@ -133,16 +132,15 @@ exports.getIncidents = async (req, res) => {
 // @access  Private
 exports.getIncidentStats = async (req, res) => {
   try {
-    const incidentCorrelation = await correlateExistingAlertsToIncidents(req.user?.id, req, { limit: 1000 });
     const stats = await Incident.getStatistics();
 
     res.status(200).json({
       success: true,
       stats,
       incidentCorrelation: {
-        createdCount: incidentCorrelation.filter(item => item.created).length,
-        linkedCount: incidentCorrelation.length,
-        incidents: incidentCorrelation
+        createdCount: 0,
+        linkedCount: 0,
+        incidents: []
       }
     });
   } catch (error) {

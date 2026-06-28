@@ -31,7 +31,7 @@ window.MICROSOC_PAGES = {
         "src": "js/app.js?v=20260623t"
       },
       {
-        "src": "js/dashboard.js?v=20260628f"
+        "src": "js/dashboard.js?v=20260628i"
       },
     ]
   },
@@ -60,7 +60,7 @@ window.MICROSOC_PAGES = {
         "src": "js/app.js?v=20260623t"
       },
       {
-        "src": "js/logs.js?v=20260628c"
+        "src": "js/logs.js?v=20260628g"
       },
       {
         "src": "data/mock-data.js"
@@ -94,7 +94,7 @@ window.MICROSOC_PAGES = {
         "src": "js/utils.js?v=20260623d"
       },
       {
-        "src": "js/analytics.js?v=20260623d"
+        "src": "js/analytics.js?v=20260628b"
       },
       {
         "code": "\n    // Initialize analytics page\n    document.addEventListener('DOMContentLoaded', function() {\n        // Get auth data\n        const token = localStorage.getItem('token');   // ✅ FIX\n        const user = JSON.parse(localStorage.getItem('user'));\n\n        if (!token || !user) {                          // ✅ SAFE CHECK\n            window.location.href = 'login.html';\n            return;\n        }\n        \n        // Update user info\n        document.getElementById('user-name').textContent = user.name;\n        document.getElementById('user-role').textContent =\n            user.role.charAt(0).toUpperCase() + user.role.slice(1);\n        \n        // Initialize analytics\n        initAnalytics();\n    });\n"
@@ -148,7 +148,7 @@ window.MICROSOC_PAGES = {
         "src": "js/app.js?v=20260623t"
       },
       {
-        "src": "js/logs.js?v=20260628c"
+        "src": "js/logs.js?v=20260628g"
       },
       {
         "src": "data/mock-data.js"
@@ -182,7 +182,7 @@ window.MICROSOC_PAGES = {
         "src": "js/utils.js?v=20260623d"
       },
       {
-        "src": "js/analytics.js?v=20260623d"
+        "src": "js/analytics.js?v=20260628b"
       },
       {
         "code": "\n    // Initialize analytics page\n    document.addEventListener('DOMContentLoaded', function() {\n        // Get auth data\n        const token = localStorage.getItem('token');   // ✅ FIX\n        const user = JSON.parse(localStorage.getItem('user'));\n\n        if (!token || !user) {                          // ✅ SAFE CHECK\n            window.location.href = 'login.html';\n            return;\n        }\n        \n        // Update user info\n        document.getElementById('user-name').textContent = user.name;\n        document.getElementById('user-role').textContent =\n            user.role.charAt(0).toUpperCase() + user.role.slice(1);\n        \n        // Initialize analytics\n        initAnalytics();\n    });\n"

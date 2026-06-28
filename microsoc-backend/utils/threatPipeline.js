@@ -433,14 +433,8 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
     ...DEFAULT_PIPELINE_SETTINGS.alertConfig,
     ...(settings.alertConfig || {})
   };
-  const incidentThreshold = Math.max(
-    1,
-    Number(settings.incidentConfig?.createIncidentAfter) || DEFAULT_PIPELINE_SETTINGS.incidentConfig.createIncidentAfter
-  );
   const failedLoginThreshold = Math.max(1, Number(alertConfig.failedLoginThreshold) || DEFAULT_PIPELINE_SETTINGS.alertConfig.failedLoginThreshold);
   const otherAlertsThreshold = Math.max(1, Number(alertConfig.otherAlertsThreshold) || DEFAULT_PIPELINE_SETTINGS.alertConfig.otherAlertsThreshold);
-  const failedLoginTriggerThreshold = Math.min(failedLoginThreshold, incidentThreshold);
-  const otherAttackTriggerThreshold = Math.min(otherAlertsThreshold, incidentThreshold);
 
   const recent5m = await getRecentLogsForSource(log.sourceIP, 5);
   const recent10m = await getRecentLogsForSource(log.sourceIP, 10);
@@ -458,7 +452,7 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
     return item.attackType === 'Brute Force' || FAILED_LOGIN_PATTERN.test(text);
   }).length;
 
-  if (failedLoginCount >= failedLoginTriggerThreshold) {
+  if (failedLoginCount >= failedLoginThreshold) {
     detections.push({
       id: 'brute_force',
       name: 'Brute Force',
@@ -482,8 +476,7 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
           message: `${failedLoginCount} authentication failures detected from ${log.sourceIP} within 5 minutes.`,
           evidence: {
             threshold: failedLoginThreshold,
-            incidentThreshold,
-            triggerThreshold: failedLoginTriggerThreshold,
+            triggerThreshold: failedLoginThreshold,
             recentAttempts: failedLoginCount,
             relatedLogs: recent5m.slice(0, 10).map(item => item._id)
           }
@@ -504,7 +497,7 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
     });
     const otherAlertCount = relatedOtherLogs.length;
 
-    if (otherAlertCount >= otherAttackTriggerThreshold) {
+    if (otherAlertCount >= otherAlertsThreshold) {
       const otherRule = otherAttackRule(effectiveAttackType);
       detections.push({
         id: otherRule.id,
@@ -529,8 +522,7 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
             message: `${otherAlertCount} ${effectiveAttackType} log${otherAlertCount === 1 ? '' : 's'} detected from ${log.sourceIP} within 10 minutes.`,
             evidence: {
               threshold: otherAlertsThreshold,
-              incidentThreshold,
-              triggerThreshold: otherAttackTriggerThreshold,
+              triggerThreshold: otherAlertsThreshold,
               recentAttempts: otherAlertCount,
               sample: log.description,
               relatedLogs: relatedOtherLogs.slice(0, 10).map(item => item._id)
@@ -793,12 +785,20 @@ async function processJob(job) {
     Number(settings.incidentConfig?.createIncidentAfter) || DEFAULT_PIPELINE_SETTINGS.incidentConfig.createIncidentAfter
   );
   const incidentResults = [];
+  const alertResults = [];
 
   for (const detection of detections) {
     const alert = await persistAlert(job.log, detection, null);
-    const correlationStats = await countSimilarAlertOccurrences(alert);
-    const detectionOccurrenceCount = getDetectionOccurrenceCount(detection);
-    const incidentSignalCount = Math.max(correlationStats.similarAlertCount, detectionOccurrenceCount);
+    alertResults.push({
+      alertId: alert?._id || alert?.id || null,
+      title: alert?.title || detection.alert?.title || '',
+      severity: alert?.severity || detection.alert?.severity || 'medium',
+      sourceIP: alert?.sourceIP || job.log?.sourceIP || '',
+      targetSystem: alert?.targetSystem || job.log?.targetSystem || '',
+      attackType: alert?.attackType || job.log?.attackType || ''
+    });
+    const alertOccurrenceCount = Math.max(1, Number(alert?.occurrenceCount || 1));
+    const incidentSignalCount = alertOccurrenceCount;
     let incidentResult = null;
     const shouldCreateIncident = incidentSignalCount >= incidentThreshold;
 
@@ -817,6 +817,7 @@ async function processJob(job) {
   return {
     log: job.log,
     detections,
+    alerts: alertResults,
     incidents: incidentResults,
     seriousDetections,
     settings: {

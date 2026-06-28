@@ -412,7 +412,6 @@ async function correlateExistingAlertsToIncidents(userId, req, options = {}) {
 
 exports.getRecentAlerts = async (req, res) => {
   try {
-    const incidentCorrelation = await correlateExistingAlertsToIncidents(req.user?.id, req, { limit: 1000 });
     const {
       page = 1,
       limit = 50,
@@ -447,9 +446,9 @@ exports.getRecentAlerts = async (req, res) => {
       alerts: alerts.map(alert => ({ ...alert, id: String(alert._id) })),
       stats,
       incidentCorrelation: {
-        createdCount: incidentCorrelation.filter(item => item.created).length,
-        linkedCount: incidentCorrelation.length,
-        incidents: incidentCorrelation
+        createdCount: 0,
+        linkedCount: 0,
+        incidents: []
       }
     });
   } catch (error) {
@@ -495,16 +494,15 @@ exports.getAlertById = async (req, res) => {
 
 exports.getAlertStats = async (req, res) => {
   try {
-    const incidentCorrelation = await correlateExistingAlertsToIncidents(req.user?.id, req, { limit: 1000 });
     const { timeRange = '24h' } = req.query;
     const stats = await Alert.getStatistics(timeRange);
     res.status(200).json({
       success: true,
       stats,
       incidentCorrelation: {
-        createdCount: incidentCorrelation.filter(item => item.created).length,
-        linkedCount: incidentCorrelation.length,
-        incidents: incidentCorrelation
+        createdCount: 0,
+        linkedCount: 0,
+        incidents: []
       }
     });
   } catch (error) {

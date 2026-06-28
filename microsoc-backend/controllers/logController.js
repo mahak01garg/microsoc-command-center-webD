@@ -18,7 +18,8 @@ exports.getLogs = async (req, res) => {
       timeRange = '24h',
       search,
       sortBy = 'timestamp',
-      sortOrder = 'desc'
+      sortOrder = 'desc',
+      includeStats = 'false'
     } = req.query;
 
     // Build query
@@ -93,18 +94,20 @@ exports.getLogs = async (req, res) => {
     const total = await Log.countDocuments(query);
     const totalPages = Math.ceil(total / limitNumber);
 
-    // Get statistics for current filters
-    const stats = await Log.getStatistics(timeRange);
+    const shouldIncludeStats = String(includeStats).toLowerCase() === 'true';
+    const stats = shouldIncludeStats ? await Log.getStatistics(timeRange) : undefined;
 
-    res.status(200).json({
+    const payload = {
       success: true,
       count: logs.length,
       total,
       page: pageNumber,
       totalPages,
-      logs: logs.map(log => ({ ...log, id: String(log._id) })),
-      stats
-    });
+      logs: logs.map(log => ({ ...log, id: String(log._id) }))
+    };
+    if (shouldIncludeStats) payload.stats = stats;
+
+    res.status(200).json(payload);
   } catch (error) {
     console.error('Get logs error:', error);
     res.status(500).json({
@@ -379,6 +382,7 @@ exports.createBulkLogs = async (req, res) => {
         completed: true,
         analyzed: pipelineResults.length,
         detections: pipelineResults.reduce((sum, result) => sum + (result.detections?.length || 0), 0),
+        alerts: pipelineResults.flatMap(result => result.alerts || []),
         incidents: pipelineResults.flatMap(result => result.incidents || []),
         incidentCreated: pipelineResults.some(result => (result.incidents || []).some(item => item.created))
       }
@@ -496,6 +500,7 @@ exports.generateMockLogs = async (req, res) => {
         completed: true,
         analyzed: pipelineResults.length,
         detections: pipelineResults.reduce((sum, result) => sum + (result.detections?.length || 0), 0),
+        alerts: pipelineResults.flatMap(result => result.alerts || []),
         incidents: pipelineResults.flatMap(result => result.incidents || []),
         incidentCreated: pipelineResults.some(result => (result.incidents || []).some(item => item.created))
       }

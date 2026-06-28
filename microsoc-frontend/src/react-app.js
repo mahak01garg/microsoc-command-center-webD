@@ -55,8 +55,13 @@
     const sidebarObservers = new WeakMap();
     let pageIntegrityObserver = null;
 
-    window.MICROSOC_API_BASE_URL = localStorage.getItem('microsocApiBaseUrl')
-        || (localStorage.getItem('microsocUseLocalApi') === 'true' ? LOCAL_API_BASE_URL : HOSTED_API_BASE_URL);
+    const isLocalFrontend = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    const storedApiBaseUrl = localStorage.getItem('microsocApiBaseUrl');
+    const effectiveStoredApiBaseUrl = isLocalFrontend && storedApiBaseUrl === HOSTED_API_BASE_URL
+        ? ''
+        : storedApiBaseUrl;
+    window.MICROSOC_API_BASE_URL = effectiveStoredApiBaseUrl
+        || (isLocalFrontend || localStorage.getItem('microsocUseLocalApi') === 'true' ? LOCAL_API_BASE_URL : HOSTED_API_BASE_URL);
 
     function getRouteFromHash() {
         const route = window.location.hash.replace(/^#\/?/, '').split('?')[0];
@@ -343,11 +348,7 @@
         const mainContent = document.querySelector('.main-content');
         installStackedNotificationSystem();
         installNotificationDropdown();
-        if (protectedRoutes.has(route)) {
-            connectRealtimeFeed(document.getElementById('legacy-page') || document);
-        } else {
-            closeRealtimeFeed();
-        }
+        closeRealtimeFeed();
         if (!mainContent) {
             document.querySelector('.ai-assistant')?.remove();
             return;
@@ -2428,10 +2429,13 @@
         async function loadAlerts(options = {}) {
             const page = Math.max(1, Number(options.page || 1));
             const append = Boolean(options.append);
-            const [alertsPayload, statsPayload] = await Promise.all([
+            const [alertsResult, statsResult] = await Promise.allSettled([
                 apiRequest(`/alerts/recent?limit=${alertsPageSize}&page=${page}&timeRange=all`),
                 apiRequest('/alerts/stats?timeRange=all')
             ]);
+            if (alertsResult.status === 'rejected') throw alertsResult.reason;
+            const alertsPayload = alertsResult.value;
+            const statsPayload = statsResult.status === 'fulfilled' ? statsResult.value : {};
             currentAlerts = append
                 ? [...currentAlerts, ...(alertsPayload.alerts || [])]
                 : (alertsPayload.alerts || []);

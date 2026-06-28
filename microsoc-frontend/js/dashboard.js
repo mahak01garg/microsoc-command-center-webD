@@ -8,7 +8,7 @@ const DASHBOARD_LIVE_STREAM_TAB_ID_KEY = 'microsocLiveStreamTabId';
 const DASHBOARD_LOG_STORAGE_KEY = 'microsocSecurityLogs';
 const DASHBOARD_LOG_TOTAL_COUNT_KEY = 'microsocSecurityLogsTotalCount';
 const DASHBOARD_DELETED_LOG_IDS_KEY = 'microsocDeletedLogIds';
-const DASHBOARD_FETCH_TIMEOUT_MS = 2500;
+const DASHBOARD_FETCH_TIMEOUT_MS = 30000;
 const DASHBOARD_SETTINGS_CACHE_KEY = 'microsocSystemSettingsCache';
 const DEFAULT_DASHBOARD_REFRESH_SECONDS = 30;
 
@@ -25,7 +25,8 @@ function getAuthHeaders() {
 
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = DASHBOARD_FETCH_TIMEOUT_MS) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutError = new DOMException(`Request timed out after ${timeoutMs}ms`, 'TimeoutError');
+    const timer = setTimeout(() => controller.abort(timeoutError), timeoutMs);
     try {
         const response = await fetch(url, { ...options, signal: controller.signal });
         const payload = await response.json().catch(() => ({}));
@@ -83,8 +84,7 @@ async function syncDashboardSettingsFromServer() {
     try {
         const { response, payload } = await fetchJsonWithTimeout(
             `${getApiBaseUrl()}/settings`,
-            { headers: getAuthHeaders() },
-            2500
+            { headers: getAuthHeaders() }
         );
         if (!response.ok || !payload.settings) return;
         localStorage.setItem(DASHBOARD_SETTINGS_CACHE_KEY, JSON.stringify({
@@ -172,10 +172,7 @@ function mergeDashboardLogs(...logGroups) {
 async function loadDashboardLogsFromApi() {
     try {
         const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=10&timeRange=all&_=${Date.now()}`, {
-            headers: {
-                ...getAuthHeaders(),
-                'Cache-Control': 'no-cache'
-            },
+            headers: getAuthHeaders(),
             cache: 'no-store'
         });
         if (!response.ok || !payload.success) {
@@ -190,11 +187,12 @@ async function loadDashboardLogsFromApi() {
 
 async function refreshDashboardLiveView() {
     syncDashboardLogsFromStorage();
-    loadTopAttackers();
-    loadAttackMap();
 
     const state = getDashboardLiveStreamState();
     if (!state.active) return;
+
+    loadTopAttackers();
+    loadAttackMap();
 
     const apiLogs = await loadDashboardLogsFromApi();
     if (apiLogs.length > 0) {
@@ -213,46 +211,43 @@ async function loadStats() {
     container.innerHTML = '<div class="empty-state">Loading dashboard stats...</div>';
 
     try {
-        const [dashboardStatsPayload, mergedLogs, logStats, incidentStats] = await Promise.all([
+        const [dashboardStatsPayload, logStats] = await Promise.all([
             fetchDashboardStatsFallback(),
-            fetchMergedDashboardLogs(),
-            fetchLogStatsFallback(),
-            fetchIncidentStatsFallback()
+            fetchLogStatsFallback()
         ]);
-        const dashboardStats = applyOpenIncidentsOverride(dashboardStatsPayload, getOpenIncidentCount(incidentStats));
+        const storedLogs = loadDashboardStoredLogs();
+        const dashboardStats = dashboardStatsPayload;
         const backendLogTotal = getLogStatsTotal(logStats);
         const securityLogsDisplayedTotal = getSecurityLogsDisplayedTotal();
 
-        if (logStats && backendLogTotal >= mergedLogs.length) {
+        if (logStats && backendLogTotal >= storedLogs.length) {
             renderDashboardStats(applyTotalLogsOverride(
                 buildStatsFromLogStats(logStats, dashboardStats),
                 Math.max(backendLogTotal, securityLogsDisplayedTotal)
             ));
-            return;
-        }
-
-        if (mergedLogs.length > backendLogTotal) {
+        } else if (storedLogs.length > backendLogTotal) {
             renderDashboardStats(applyTotalLogsOverride(
-                buildStatsFromStoredLogs(summarizeStoredLogs(mergedLogs), dashboardStats),
-                Math.max(mergedLogs.length, securityLogsDisplayedTotal)
+                buildStatsFromStoredLogs(summarizeStoredLogs(storedLogs), dashboardStats),
+                Math.max(storedLogs.length, securityLogsDisplayedTotal)
             ));
-            return;
-        }
-
-        if (logStats) {
+        } else if (logStats) {
             renderDashboardStats(applyTotalLogsOverride(
                 buildStatsFromLogStats(logStats, dashboardStats),
                 Math.max(backendLogTotal, securityLogsDisplayedTotal)
             ));
-            return;
-        }
-
-        if (dashboardStats.length && dashboardStats.some(stat => String(stat.value || '').trim() !== '0')) {
+        } else if (dashboardStats.length && dashboardStats.some(stat => String(stat.value || '').trim() !== '0')) {
             renderDashboardStats(dashboardStats);
-            return;
+        } else {
+            renderDashboardStats(dashboardStats);
         }
 
-        renderDashboardStats(dashboardStats);
+        fetchIncidentStatsFallback().then((incidentStats) => {
+            if (!incidentStats) return;
+            const currentStats = logStats
+                ? applyTotalLogsOverride(buildStatsFromLogStats(logStats, dashboardStats), Math.max(backendLogTotal, securityLogsDisplayedTotal))
+                : dashboardStats;
+            renderDashboardStats(applyOpenIncidentsOverride(currentStats, getOpenIncidentCount(incidentStats)));
+        });
     } catch (error) {
         console.error('Dashboard stats failed:', error);
         const logStats = await fetchLogStatsFallback();
@@ -287,7 +282,7 @@ function applyTotalLogsOverride(stats, totalLogs) {
 async function fetchMergedDashboardLogs() {
     const storedLogs = loadDashboardStoredLogs();
     try {
-        const apiLogs = await loadLogsForRange('all', 5000);
+        const apiLogs = await loadLogsForRange('all', 300);
         return mergeDashboardLogs(apiLogs, storedLogs);
     } catch (error) {
         console.warn('Dashboard merged log count fallback failed:', error);
@@ -299,7 +294,7 @@ async function fetchDashboardStatsFallback() {
     try {
         const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/dashboard/stats`, {
             headers: getAuthHeaders()
-        });
+        }, 12000);
         if (!response.ok || !payload.success) {
             return [];
         }
@@ -314,7 +309,7 @@ async function fetchIncidentStatsFallback() {
     try {
         const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/incidents/stats`, {
             headers: getAuthHeaders()
-        });
+        }, 8000);
         if (!response.ok || !payload.success || !payload.stats) {
             return null;
         }
@@ -397,7 +392,7 @@ async function fetchLogStatsFallback() {
     try {
         const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs/stats?timeRange=all`, {
             headers: getAuthHeaders()
-        });
+        }, 12000);
         if (!response.ok || !payload.success || !payload.stats) {
             return null;
         }
@@ -484,39 +479,15 @@ function getCountryPosition(value, index = 0) {
     return COUNTRY_POSITION_MAP[key] || [18 + ((index * 13) % 64), 24 + ((index * 19) % 46)];
 }
 
-async function loadLogsForRange(timeRange = '24h', limit = 5000) {
+async function loadLogsForRange(timeRange = '24h', limit = 300) {
     const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=${limit}&timeRange=${encodeURIComponent(timeRange)}&_=${Date.now()}`, {
-        headers: {
-            ...getAuthHeaders(),
-            'Cache-Control': 'no-cache'
-        },
+        headers: getAuthHeaders(),
         cache: 'no-store'
-    }, 10000);
+    }, 8000);
     if (!response.ok || !payload.success) {
         throw new Error(payload.message || 'Could not load logs');
     }
-    const logs = Array.isArray(payload.logs) ? [...payload.logs] : [];
-    const totalPages = Math.max(1, Number(payload.totalPages) || 1);
-
-    if (totalPages > 1) {
-        const remainingPages = Array.from({ length: totalPages - 1 }, (_, index) => index + 2);
-        const pageResponses = await Promise.all(remainingPages.map(async (page) => {
-            const pageResult = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=${limit}&page=${page}&timeRange=${encodeURIComponent(timeRange)}&_=${Date.now()}`, {
-                headers: {
-                    ...getAuthHeaders(),
-                    'Cache-Control': 'no-cache'
-                },
-                cache: 'no-store'
-            }, 10000);
-            if (!pageResult.response.ok || !pageResult.payload.success) {
-                return [];
-            }
-            return Array.isArray(pageResult.payload.logs) ? pageResult.payload.logs : [];
-        }));
-        pageResponses.forEach(pageLogs => logs.push(...pageLogs));
-    }
-
-    return filterDashboardDeletedLogs(logs);
+    return filterDashboardDeletedLogs(Array.isArray(payload.logs) ? payload.logs : []);
 }
 
 async function loadLogsForTrends() {
@@ -910,15 +881,15 @@ async function loadTopAttackers() {
     const container = document.getElementById('top-attackers');
     if (!container) return;
     const storedAttackers = getTopAttackersFromStoredLogs();
+    if (storedAttackers.length) {
+        renderTopAttackers(storedAttackers);
+    }
 
     try {
-        const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=200&timeRange=all&_=${Date.now()}`, {
-            headers: {
-                ...getAuthHeaders(),
-                'Cache-Control': 'no-cache'
-            },
+        const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=100&timeRange=all&_=${Date.now()}`, {
+            headers: getAuthHeaders(),
             cache: 'no-store'
-        });
+        }, 8000);
         if (!response.ok || !payload.success) throw new Error(payload.message || 'Could not load top attackers');
         const apiLogs = filterDashboardDeletedLogs(payload.logs || []);
         const attackers = summarizeTopAttackers(apiLogs);
@@ -1005,38 +976,18 @@ function renderEmptyTopAttackers() {
 async function loadAttackMap() {
     const container = document.getElementById('attack-map-container');
     if (!container) return;
+    renderAttackMap(loadDashboardStoredLogs());
 
     try {
-        const firstPage = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=5000&page=1&timeRange=all&_=${Date.now()}`, {
-            headers: {
-                ...getAuthHeaders(),
-                'Cache-Control': 'no-cache'
-            },
+        const firstPage = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=200&page=1&timeRange=all&_=${Date.now()}`, {
+            headers: getAuthHeaders(),
             cache: 'no-store'
-        }, 10000);
+        }, 8000);
         const { response, payload } = firstPage;
         if (!response.ok || !payload.success) {
             throw new Error(payload.message || 'Could not load attack map');
         }
-        const logs = Array.isArray(payload.logs) ? [...payload.logs] : [];
-        const totalPages = Math.max(1, Number(payload.totalPages) || 1);
-        if (totalPages > 1) {
-            const remainingPages = Array.from({ length: totalPages - 1 }, (_, index) => index + 2);
-            const pageResponses = await Promise.all(remainingPages.map(async (page) => {
-                const pageResult = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=5000&page=${page}&timeRange=all&_=${Date.now()}`, {
-                    headers: {
-                        ...getAuthHeaders(),
-                        'Cache-Control': 'no-cache'
-                    },
-                    cache: 'no-store'
-                }, 10000);
-                if (!pageResult.response.ok || !pageResult.payload.success) {
-                    return [];
-                }
-                return Array.isArray(pageResult.payload.logs) ? pageResult.payload.logs : [];
-            }));
-            pageResponses.forEach(pageLogs => logs.push(...pageLogs));
-        }
+        const logs = Array.isArray(payload.logs) ? payload.logs : [];
         renderAttackMap(filterDashboardDeletedLogs(logs));
         return;
     } catch (error) {
@@ -1757,7 +1708,7 @@ async function checkSystemHealth() {
     const aiResponse = document.getElementById('ai-response');
 
     try {
-        const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/health`, {}, 3000);
+        const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/health`, {}, 10000);
         if (response.ok) {
             if (backendStatus) backendStatus.className = 'status-indicator status-good';
             if (backendResponse) backendResponse.textContent = payload?.status === 'ok' ? 'Connected' : 'Available';
@@ -1789,7 +1740,7 @@ async function checkSystemHealth() {
     try {
         const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/ai/status`, {
             headers: getAuthHeaders()
-        }, 3000);
+        }, 10000);
         if (response.ok && payload.success) {
             const healthy = payload.healthy !== false && payload.hasProviderKey !== false;
             if (aiStatus) aiStatus.className = healthy ? 'status-indicator status-good' : 'status-indicator status-warning';
