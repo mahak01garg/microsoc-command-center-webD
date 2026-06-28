@@ -1,11 +1,14 @@
 const Alert = require('../models/Alert');
 const Incident = require('../models/Incident');
 const SystemSettings = require('../models/SystemSettings');
+const User = require('../models/User');
 const realtimeHub = require('../utils/realtimeHub');
 const { recordAuditEvent } = require('../utils/auditLogger');
 
 const AUTO_INCIDENT_TAG = 'auto-alert-correlation';
 const DEFAULT_INCIDENT_THRESHOLD = 3;
+const INCIDENT_DESCRIPTION_LIMIT = 1900;
+const INCIDENT_TITLE_LIMIT = 190;
 
 function relatedCvesForAttack(value = '') {
   const key = String(value || '').toLowerCase();
@@ -117,6 +120,20 @@ function sanitizeTag(value) {
     .slice(0, 50);
 }
 
+function truncateText(value, limit) {
+  const text = String(value || '').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 14)).trim()}... [truncated]`;
+}
+
+function normalizeIncidentTags(tags = []) {
+  return [...new Set(tags.map(sanitizeTag).filter(Boolean))];
+}
+
+function normalizeIncidentText(value, fallback, limit) {
+  return truncateText(value || fallback, limit);
+}
+
 function isIPv4(value) {
   return /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$/.test(String(value || ''));
 }
@@ -173,10 +190,6 @@ function buildSimilarityQuery(alert) {
     deletedAt: { $exists: false }
   };
 
-  if (alert.ruleId) {
-    query.ruleId = alert.ruleId;
-  }
-
   if (alert.attackType) {
     query.attackType = alert.attackType;
   }
@@ -189,19 +202,38 @@ function buildSimilarityQuery(alert) {
     query,
     scope,
     ruleKey: sanitizeTag(ruleKey),
-    correlationTag: sanitizeTag(`${AUTO_INCIDENT_TAG}:${ruleKey}:${alert.attackType || 'attack'}:${scope.field || 'scope'}:${scope.value || 'any'}`)
+    correlationTag: sanitizeTag(`${AUTO_INCIDENT_TAG}:${alert.attackType || 'attack'}:${scope.field || 'scope'}:${scope.value || 'any'}`)
   };
+}
+
+async function resolveIncidentCreator(userId) {
+  if (userId && User.db.base.Types.ObjectId.isValid(String(userId))) {
+    return userId;
+  }
+
+  const primaryAdmin = await User.findOne({ email: User.getPrimaryAdminEmail() }).select('_id').lean();
+  if (primaryAdmin?._id) return primaryAdmin._id;
+
+  const anyAdmin = await User.findOne({ role: 'admin' }).select('_id').lean();
+  if (anyAdmin?._id) return anyAdmin._id;
+
+  throw new Error('Cannot create correlated incident because no admin user exists for createdBy');
 }
 
 async function correlateAlertToIncident(alert, userId, req) {
   const settings = await SystemSettings.getSingleton();
+  const createdBy = await resolveIncidentCreator(userId);
   const threshold = Math.max(1, Number(settings.incidentConfig?.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD);
   const severityEscalationEnabled = settings.incidentConfig?.severityEscalationEnabled !== false;
   const { query, scope, ruleKey, correlationTag } = buildSimilarityQuery(alert);
   const similarAlerts = await Alert.find(query).sort({ lastSeen: 1 });
+  const similarAlertCount = similarAlerts.reduce(
+    (sum, item) => sum + Math.max(1, Number(item.occurrenceCount || 1)),
+    0
+  );
 
-  if (similarAlerts.length < threshold) {
-    return { created: false, incident: null, similarAlertCount: similarAlerts.length, threshold };
+  if (similarAlertCount < threshold) {
+    return { created: false, incident: null, similarAlertCount, threshold };
   }
 
   const sourceIPs = [...new Set(similarAlerts.map(item => item.sourceIP).filter(Boolean))];
@@ -231,9 +263,9 @@ async function correlateAlertToIncident(alert, userId, req) {
 
   if (!incident) {
     incident = await Incident.create({
-      title,
-      description: [
-        `${similarAlerts.length} similar alerts reached the incident threshold (${threshold}).`,
+      title: normalizeIncidentText(title, 'Repeated security alerts', INCIDENT_TITLE_LIMIT),
+      description: normalizeIncidentText([
+        `${similarAlertCount} similar alert occurrence(s) reached the incident threshold (${threshold}).`,
         '',
         `Rule: ${alert.ruleId || 'N/A'}`,
         `Attack Type: ${alert.attackType || 'Unknown'}`,
@@ -242,44 +274,61 @@ async function correlateAlertToIncident(alert, userId, req) {
         `Source IPs: ${sourceIPs.join(', ') || 'Unknown'}`,
         `Affected Systems: ${affectedSystems.join(', ') || 'Unknown'}`,
         `Latest Alert: ${alert.title}`
-      ].join('\n'),
+      ].join('\n'), 'Similar alerts reached the incident threshold.', INCIDENT_DESCRIPTION_LIMIT),
       severity: highestSeverity,
       status: 'open',
       category: incidentCategoryForAlert(alert),
       sourceIP,
       affectedSystems,
-      createdBy: userId,
+      createdBy,
       relatedLogs,
       relatedCves,
       impact: highestSeverity,
       priority: highestSeverity,
-      tags: [AUTO_INCIDENT_TAG, correlationTag, ruleKey, sanitizeTag(alert.attackType || 'alert')].filter(Boolean),
+      tags: normalizeIncidentTags([AUTO_INCIDENT_TAG, correlationTag, ruleKey, alert.attackType || 'alert']),
       threatIntel: {
-        riskScore: Math.min(100, 45 + similarAlerts.length * 10),
-        confidence: Math.min(95, 55 + similarAlerts.length * 8),
+        riskScore: Math.min(100, 45 + similarAlertCount * 10),
+        confidence: Math.min(95, 55 + similarAlertCount * 8),
         mitreTechnique: alert.mitreTechnique || 'Unknown',
         recommendedAction: 'Investigate repeated correlated alerts and validate containment.'
       }
     });
     await incident.addTimelineEvent(
       'Auto-created from similar alerts',
-      userId,
-      `${similarAlerts.length} alerts matched ${alert.ruleId || alert.attackType || 'rule'} by same ${scope.label}${scope.value ? ` (${scope.value})` : ''}.`
+      createdBy,
+      `${similarAlertCount} alert occurrence(s) matched ${alert.ruleId || alert.attackType || 'rule'} by same ${scope.label}${scope.value ? ` (${scope.value})` : ''}.`
     );
   } else {
+    const existingRelatedLogs = (incident.relatedLogs || []).map(String);
+    const nextRelatedLogs = [...new Set([...existingRelatedLogs, ...relatedLogs])];
+    const nextAffectedSystems = [...new Set([...(incident.affectedSystems || []), ...affectedSystems])];
+    const shouldEscalate = severityEscalationEnabled && (
+      incident.severity !== highestSeverity ||
+      incident.priority !== highestSeverity ||
+      incident.impact !== highestSeverity
+    );
+    const hasNewLinks = similarAlerts.some(item => String(item.incident || '') !== String(incident._id))
+      || nextRelatedLogs.length !== existingRelatedLogs.length
+      || nextAffectedSystems.length !== (incident.affectedSystems || []).length;
+
     if (severityEscalationEnabled) {
       incident.severity = highestSeverity;
       incident.priority = highestSeverity;
       incident.impact = highestSeverity;
     }
-    incident.affectedSystems = [...new Set([...(incident.affectedSystems || []), ...affectedSystems])];
-    incident.relatedLogs = [...new Set([...(incident.relatedLogs || []).map(String), ...relatedLogs])];
-    incident.tags = [...new Set([...(incident.tags || []), AUTO_INCIDENT_TAG, correlationTag, ruleKey])];
-    await incident.addTimelineEvent(
-      'Auto-updated from similar alert',
-      userId,
-      `${alert.title} matched existing correlated incident.`
-    );
+    incident.affectedSystems = nextAffectedSystems;
+    incident.relatedLogs = nextRelatedLogs;
+    incident.description = normalizeIncidentText(incident.description, 'Correlated alert incident.', INCIDENT_DESCRIPTION_LIMIT);
+    incident.tags = normalizeIncidentTags([...(incident.tags || []), AUTO_INCIDENT_TAG, correlationTag, ruleKey]);
+    if (hasNewLinks || shouldEscalate) {
+      await incident.addTimelineEvent(
+        'Auto-updated from similar alert',
+        createdBy,
+        `${alert.title} matched existing correlated incident.`
+      );
+    } else {
+      await incident.save();
+    }
   }
 
   await Alert.updateMany(
@@ -317,7 +366,7 @@ async function correlateAlertToIncident(alert, userId, req) {
       metadata: {
         alertId: String(alert._id || alert.id || ''),
         attackType: alert.attackType,
-        similarAlertCount: similarAlerts.length,
+        similarAlertCount,
         threshold,
         severityEscalationEnabled,
         correlation: scope
@@ -325,11 +374,45 @@ async function correlateAlertToIncident(alert, userId, req) {
     });
   }
 
-  return { created, incident: populatedIncident, similarAlertCount: similarAlerts.length, threshold };
+  return { created, incident: populatedIncident, similarAlertCount, threshold };
+}
+
+async function correlateExistingAlertsToIncidents(userId, req, options = {}) {
+  const limit = Math.min(1000, Math.max(1, Number(options.limit) || 500));
+  const alerts = await Alert.find({
+    deletedAt: { $exists: false },
+    status: { $in: ['new', 'in_progress'] }
+  })
+    .sort({ lastSeen: -1 })
+    .limit(limit);
+
+  const seen = new Set();
+  const results = [];
+
+  for (const alert of alerts) {
+    const { query } = buildSimilarityQuery(alert);
+    const key = JSON.stringify(query);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const result = await correlateAlertToIncident(alert, userId, req);
+    if (result?.incident) {
+      results.push({
+        created: Boolean(result.created),
+        incidentId: result.incident._id || result.incident.id,
+        title: result.incident.title,
+        similarAlertCount: result.similarAlertCount,
+        threshold: result.threshold
+      });
+    }
+  }
+
+  return results;
 }
 
 exports.getRecentAlerts = async (req, res) => {
   try {
+    const incidentCorrelation = await correlateExistingAlertsToIncidents(req.user?.id, req, { limit: 1000 });
     const {
       page = 1,
       limit = 50,
@@ -362,7 +445,12 @@ exports.getRecentAlerts = async (req, res) => {
       page: pageNumber,
       totalPages,
       alerts: alerts.map(alert => ({ ...alert, id: String(alert._id) })),
-      stats
+      stats,
+      incidentCorrelation: {
+        createdCount: incidentCorrelation.filter(item => item.created).length,
+        linkedCount: incidentCorrelation.length,
+        incidents: incidentCorrelation
+      }
     });
   } catch (error) {
     console.error('Get recent alerts error:', error);
@@ -407,11 +495,17 @@ exports.getAlertById = async (req, res) => {
 
 exports.getAlertStats = async (req, res) => {
   try {
+    const incidentCorrelation = await correlateExistingAlertsToIncidents(req.user?.id, req, { limit: 1000 });
     const { timeRange = '24h' } = req.query;
     const stats = await Alert.getStatistics(timeRange);
     res.status(200).json({
       success: true,
-      stats
+      stats,
+      incidentCorrelation: {
+        createdCount: incidentCorrelation.filter(item => item.created).length,
+        linkedCount: incidentCorrelation.length,
+        incidents: incidentCorrelation
+      }
     });
   } catch (error) {
     console.error('Get alert stats error:', error);
@@ -472,10 +566,13 @@ exports.createAlert = async (req, res) => {
     console.error('Create alert error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: error.message || 'Server error'
     });
   }
 };
+
+exports.correlateAlertToIncident = correlateAlertToIncident;
+exports.correlateExistingAlertsToIncidents = correlateExistingAlertsToIncidents;
 
 exports.updateAlert = async (req, res) => {
   try {

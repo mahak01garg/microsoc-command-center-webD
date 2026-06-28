@@ -6,6 +6,7 @@ let dashboardAttackTrendsLoading = false;
 const DASHBOARD_LIVE_STREAM_STATE_KEY = 'microsocLiveStreamState';
 const DASHBOARD_LIVE_STREAM_TAB_ID_KEY = 'microsocLiveStreamTabId';
 const DASHBOARD_LOG_STORAGE_KEY = 'microsocSecurityLogs';
+const DASHBOARD_LOG_TOTAL_COUNT_KEY = 'microsocSecurityLogsTotalCount';
 const DASHBOARD_DELETED_LOG_IDS_KEY = 'microsocDeletedLogIds';
 const DASHBOARD_FETCH_TIMEOUT_MS = 2500;
 const DASHBOARD_SETTINGS_CACHE_KEY = 'microsocSystemSettingsCache';
@@ -212,11 +213,37 @@ async function loadStats() {
     container.innerHTML = '<div class="empty-state">Loading dashboard stats...</div>';
 
     try {
-        const logStats = await fetchLogStatsFallback();
-        const dashboardStats = await fetchDashboardStatsFallback();
+        const [dashboardStatsPayload, mergedLogs, logStats, incidentStats] = await Promise.all([
+            fetchDashboardStatsFallback(),
+            fetchMergedDashboardLogs(),
+            fetchLogStatsFallback(),
+            fetchIncidentStatsFallback()
+        ]);
+        const dashboardStats = applyOpenIncidentsOverride(dashboardStatsPayload, getOpenIncidentCount(incidentStats));
+        const backendLogTotal = getLogStatsTotal(logStats);
+        const securityLogsDisplayedTotal = getSecurityLogsDisplayedTotal();
+
+        if (logStats && backendLogTotal >= mergedLogs.length) {
+            renderDashboardStats(applyTotalLogsOverride(
+                buildStatsFromLogStats(logStats, dashboardStats),
+                Math.max(backendLogTotal, securityLogsDisplayedTotal)
+            ));
+            return;
+        }
+
+        if (mergedLogs.length > backendLogTotal) {
+            renderDashboardStats(applyTotalLogsOverride(
+                buildStatsFromStoredLogs(summarizeStoredLogs(mergedLogs), dashboardStats),
+                Math.max(mergedLogs.length, securityLogsDisplayedTotal)
+            ));
+            return;
+        }
 
         if (logStats) {
-            renderDashboardStats(buildStatsFromLogStats(logStats, dashboardStats));
+            renderDashboardStats(applyTotalLogsOverride(
+                buildStatsFromLogStats(logStats, dashboardStats),
+                Math.max(backendLogTotal, securityLogsDisplayedTotal)
+            ));
             return;
         }
 
@@ -237,6 +264,37 @@ async function loadStats() {
     }
 }
 
+function getLogStatsTotal(logStats) {
+    return Number(logStats?.totalLogs?.[0]?.count || 0);
+}
+
+function getSecurityLogsDisplayedTotal() {
+    const total = Number(localStorage.getItem(DASHBOARD_LOG_TOTAL_COUNT_KEY) || 0);
+    return Number.isFinite(total) && total > 0 ? total : 0;
+}
+
+function applyTotalLogsOverride(stats, totalLogs) {
+    if (!Number.isFinite(Number(totalLogs)) || Number(totalLogs) <= 0) return stats;
+    return (Array.isArray(stats) ? stats : []).map(stat => {
+        if (stat.title !== 'Total Logs') return stat;
+        return {
+            ...stat,
+            value: Number(totalLogs).toLocaleString()
+        };
+    });
+}
+
+async function fetchMergedDashboardLogs() {
+    const storedLogs = loadDashboardStoredLogs();
+    try {
+        const apiLogs = await loadLogsForRange('all', 5000);
+        return mergeDashboardLogs(apiLogs, storedLogs);
+    } catch (error) {
+        console.warn('Dashboard merged log count fallback failed:', error);
+        return storedLogs;
+    }
+}
+
 async function fetchDashboardStatsFallback() {
     try {
         const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/dashboard/stats`, {
@@ -250,6 +308,44 @@ async function fetchDashboardStatsFallback() {
         console.warn('Dashboard stats fetch failed:', error);
         return [];
     }
+}
+
+async function fetchIncidentStatsFallback() {
+    try {
+        const { response, payload } = await fetchJsonWithTimeout(`${getApiBaseUrl()}/incidents/stats`, {
+            headers: getAuthHeaders()
+        });
+        if (!response.ok || !payload.success || !payload.stats) {
+            return null;
+        }
+        return payload.stats;
+    } catch (error) {
+        console.warn('Incident stats fetch failed:', error);
+        return null;
+    }
+}
+
+function getOpenIncidentCount(stats) {
+    const statusCounts = Object.fromEntries((stats?.statusCounts || []).map(item => [item._id, item.count]));
+    return Number(statusCounts.open || 0);
+}
+
+function applyOpenIncidentsOverride(stats, openIncidents) {
+    if (!Number.isFinite(Number(openIncidents))) return stats;
+    const statList = Array.isArray(stats) ? stats : [];
+    const filtered = statList.filter(stat => !['Active Incidents', 'Open Incidents'].includes(stat.title));
+    return [
+        ...filtered.slice(0, 2),
+        {
+            icon: 'fa-exclamation-triangle',
+            title: 'Open Incidents',
+            value: Number(openIncidents),
+            change: Number(openIncidents) > 10 ? '+2' : '-1',
+            changeType: Number(openIncidents) > 10 ? 'negative' : 'positive',
+            color: '#dc3545'
+        },
+        ...filtered.slice(2)
+    ];
 }
 
 function renderDashboardStats(stats) {
@@ -507,8 +603,28 @@ function summarizeLogStats(logStats) {
     };
 }
 
+function normalizeDashboardStat(stat = {}) {
+    if (stat.title === 'Critical Threats') {
+        return { ...stat, title: 'Critical Incidents' };
+    }
+    return stat;
+}
+
 function pickDashboardStat(stats, title, fallback) {
-    return (Array.isArray(stats) ? stats : []).find(stat => stat.title === title) || fallback;
+    return (Array.isArray(stats) ? stats : [])
+        .map(normalizeDashboardStat)
+        .find(stat => stat.title === title) || fallback;
+}
+
+function criticalIncidentsFallback() {
+    return {
+        icon: 'fa-skull-crossbones',
+        title: 'Critical Incidents',
+        value: 0,
+        change: 'Backend needed',
+        changeType: 'positive',
+        color: '#fd7e14'
+    };
 }
 
 function buildStatsFromLogStats(logStats, dashboardStats = []) {
@@ -552,22 +668,15 @@ function buildStatsFromLogStats(logStats, dashboardStats = []) {
             changeType: summary.totalLogs > 0 ? 'negative' : 'positive',
             color: '#007bff'
         },
-        pickDashboardStat(dashboardStats, 'Active Incidents', {
+        pickDashboardStat(dashboardStats, 'Open Incidents', {
             icon: 'fa-exclamation-triangle',
-            title: 'Active Incidents',
+            title: 'Open Incidents',
             value: 0,
             change: 'Stable',
             changeType: 'positive',
             color: '#dc3545'
         }),
-        pickDashboardStat(dashboardStats, 'Critical Threats', {
-            icon: 'fa-skull-crossbones',
-            title: 'Critical Threats',
-            value: summary.criticalLogs,
-            change: summary.criticalLogs > 0 ? '+Active' : 'Stable',
-            changeType: summary.criticalLogs > 0 ? 'negative' : 'positive',
-            color: '#fd7e14'
-        }),
+        pickDashboardStat(dashboardStats, 'Critical Incidents', criticalIncidentsFallback()),
         pickDashboardStat(dashboardStats, 'Avg Response Time', {
             icon: 'fa-clock',
             title: 'Avg Response Time',
@@ -606,8 +715,8 @@ function loadLocalStats() {
 
     renderDashboardStats([
         { icon: 'fa-broadcast-tower', title: 'Total Logs', value: '0', change: 'Waiting', changeType: 'positive', color: '#007bff' },
-        { icon: 'fa-exclamation-triangle', title: 'Active Incidents', value: '0', change: 'Waiting', changeType: 'positive', color: '#dc3545' },
-        { icon: 'fa-skull-crossbones', title: 'Critical Threats', value: '0', change: 'Waiting', changeType: 'positive', color: '#fd7e14' },
+        { icon: 'fa-exclamation-triangle', title: 'Open Incidents', value: '0', change: 'Waiting', changeType: 'positive', color: '#dc3545' },
+        { icon: 'fa-skull-crossbones', title: 'Critical Incidents', value: '0', change: 'Waiting', changeType: 'positive', color: '#fd7e14' },
         { icon: 'fa-clock', title: 'Avg Response Time', value: 'N/A', change: 'Waiting', changeType: 'positive', color: '#28a745' },
         { icon: 'fa-shield-alt', title: 'Attack Prevention', value: '0%', detail: '0 / 0 attacks blocked', change: 'Waiting', changeType: 'positive', color: '#17a2b8' },
         { icon: 'fa-ban', title: 'Blocked Attacks', value: '0', change: 'Waiting', changeType: 'positive', color: '#28a745' },
@@ -625,7 +734,7 @@ function summarizeStoredLogs(logs) {
     return { totalLogs, blockedAttacks, criticalLogs, highLogs, mediumLogs, uniqueSources, blockedPercentage };
 }
 
-function buildStatsFromStoredLogs(summary) {
+function buildStatsFromStoredLogs(summary, dashboardStats = []) {
     const severityTotal = Math.max(1, summary.criticalLogs + summary.highLogs + summary.mediumLogs);
     const logPressure = Math.round(
         ((summary.criticalLogs / severityTotal) * 45) +
@@ -665,30 +774,23 @@ function buildStatsFromStoredLogs(summary) {
             changeType: summary.totalLogs > 0 ? 'negative' : 'positive',
             color: '#007bff'
         },
-        {
+        pickDashboardStat(dashboardStats, 'Open Incidents', {
             icon: 'fa-exclamation-triangle',
-            title: 'Active Incidents',
+            title: 'Open Incidents',
             value: 0,
             change: 'Local only',
             changeType: 'positive',
             color: '#dc3545'
-        },
-        {
-            icon: 'fa-skull-crossbones',
-            title: 'Critical Threats',
-            value: summary.criticalLogs,
-            change: summary.criticalLogs > 0 ? '+Active' : 'Stable',
-            changeType: summary.criticalLogs > 0 ? 'negative' : 'positive',
-            color: '#fd7e14'
-        },
-        {
+        }),
+        pickDashboardStat(dashboardStats, 'Critical Incidents', criticalIncidentsFallback()),
+        pickDashboardStat(dashboardStats, 'Avg Response Time', {
             icon: 'fa-clock',
             title: 'Avg Response Time',
             value: 'N/A',
             change: 'Backend needed',
             changeType: 'positive',
             color: '#28a745'
-        },
+        }),
         {
             icon: 'fa-shield-alt',
             title: 'Attack Prevention',

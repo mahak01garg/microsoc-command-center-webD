@@ -1,5 +1,6 @@
 const SystemSettings = require('../models/SystemSettings');
 const { recordAuditEvent } = require('../utils/auditLogger');
+const { correlateExistingAlertsToIncidents } = require('./alertsController');
 
 const DEFAULT_SETTINGS = {
   generalSettings: {
@@ -131,6 +132,15 @@ exports.updateSettings = async (req, res) => {
     settings.updatedBy = req.user?.email || req.user?.name || 'admin';
     await settings.save();
 
+    let incidentCorrelation = [];
+    if (req.body?.incidentConfig || req.body?.alertConfig) {
+      try {
+        incidentCorrelation = await correlateExistingAlertsToIncidents(req.user?.id, req, { limit: 1000 });
+      } catch (correlationError) {
+        console.warn('Settings alert-to-incident correlation failed:', correlationError.message);
+      }
+    }
+
     try {
       await recordAuditEvent(req, {
         systemAction: true,
@@ -152,7 +162,13 @@ exports.updateSettings = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      settings: normalizeSettings(settings)
+      settings: normalizeSettings(settings),
+      incidentCorrelation: {
+        checked: Boolean(req.body?.incidentConfig || req.body?.alertConfig),
+        incidents: incidentCorrelation,
+        createdCount: incidentCorrelation.filter(item => item.created).length,
+        linkedCount: incidentCorrelation.length
+      }
     });
   } catch (error) {
     console.error('Update settings error:', error);

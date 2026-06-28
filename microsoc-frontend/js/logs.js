@@ -5,9 +5,14 @@ let filteredLogs = [];
 let currentLogs = [];
 let selectedLogs = new Set();
 let isLiveStreaming = false;
+let isLiveStreamStarting = false;
 let liveStreamInterval = null;
 let liveStreamFirstTimer = null;
 let liveRenderTimer = null;
+let liveStreamThresholdSettings = null;
+let liveAttackScenario = null;
+let liveAttackScenarioCursor = 0;
+let liveStreamGeneration = 0;
 let pendingLiveLogs = [];
 let lastLiveNotificationAt = 0;
 let autoConvertedLiveLogIds = new Set();
@@ -16,6 +21,7 @@ let currentPage = 1;
 let itemsPerPage = 25;
 let totalPages = 1;
 const LOG_STORAGE_KEY = 'microsocSecurityLogs';
+const LOG_TOTAL_COUNT_KEY = 'microsocSecurityLogsTotalCount';
 const DELETED_LOG_IDS_KEY = 'microsocDeletedLogIds';
 const ARCHIVED_LOG_IDS_KEY = 'microsocArchivedLogIds';
 const ARCHIVED_LOGS_KEY = 'microsocArchivedLogs';
@@ -33,6 +39,27 @@ const DEFAULT_ALERT_SETTINGS = {
     failedLoginThreshold: 5,
     otherAlertsThreshold: 1
 };
+const DEFAULT_LIVE_STREAM_SETTINGS = {
+    ...DEFAULT_ALERT_SETTINGS,
+    createIncidentAfter: DEFAULT_INCIDENT_THRESHOLD
+};
+const LIVE_ATTACK_SCENARIO_TYPES = [
+    'SQL Injection',
+    'XSS',
+    'DDoS',
+    'Log4Shell Exploit',
+    'Exchange Server Exploit',
+    'Port Scan',
+    'Brute Force',
+    'Credential Stuffing',
+    'Password Spraying',
+    'Malware',
+    'Phishing',
+    'PowerShell Abuse',
+    'Ransomware',
+    'Microsoft Outlook Exploit',
+    'Apache Struts Exploit'
+];
 let logsApiRefreshTimer = null;
 
 function getCurrentUserRole() {
@@ -260,6 +287,7 @@ function filterArchivedLogs(logs) {
 function saveStoredLogs() {
     const sortedLogs = filterArchivedLogs(filterDeletedLogs([...allLogs])).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     allLogs = sortedLogs;
+    localStorage.setItem(LOG_TOTAL_COUNT_KEY, String(sortedLogs.length));
     localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(sortedLogs.slice(0, MAX_STORED_LOGS)));
     window.dispatchEvent(new CustomEvent('microsoc:logs-updated', { detail: { logs: allLogs } }));
 }
@@ -641,6 +669,7 @@ function updateLogStats() {
     setText('blocked-attacks', blockedAttacks);
     setText('unique-sources', uniqueSources);
     setText('log-count', totalLogs);
+    localStorage.setItem(LOG_TOTAL_COUNT_KEY, String(totalLogs));
 
     const updateCardMeta = (valueId, text, tone = 'neutral') => {
         const valueElement = document.getElementById(valueId);
@@ -910,18 +939,28 @@ function changeItemsPerPage() {
 }
 
 // Live Stream Functions
-function startLiveStream(options = {}) {
-    if (isLiveStreaming) return;
+async function startLiveStream(options = {}) {
+    if (isLiveStreaming || isLiveStreamStarting) return;
+    isLiveStreamStarting = true;
+    const generation = liveStreamGeneration + 1;
+    liveStreamGeneration = generation;
+    updateLiveStreamControls();
 
     const claimed = claimLiveStreamOwnership();
     if (!claimed && !options.fromSync) {
+        isLiveStreamStarting = false;
         showNotification('Live stream is already running in another tab.', 'warning', {
             title: 'Live Stream'
         });
         return;
     }
+
+    liveStreamThresholdSettings = await getAlertThresholdSettings();
+    if (generation !== liveStreamGeneration || !isLiveStreamStarting) return;
+    liveAttackScenario = buildLiveAttackScenario(liveStreamThresholdSettings);
     
     isLiveStreaming = true;
+    isLiveStreamStarting = false;
     updateLiveStreamControls();
     setLiveStreamState({
         active: true,
@@ -931,11 +970,11 @@ function startLiveStream(options = {}) {
     });
     
     liveStreamFirstTimer = setTimeout(() => {
-        addNewLiveLog();
+        addNewLiveLog(generation);
     }, LIVE_STREAM_FIRST_DELAY_MS);
 
     liveStreamInterval = setInterval(() => {
-        addNewLiveLog();
+        addNewLiveLog(generation);
     }, LIVE_STREAM_INTERVAL_MS);
 
     if (!options.fromSync) {
@@ -946,10 +985,13 @@ function startLiveStream(options = {}) {
 }
 
 function pauseLiveStream(options = {}) {
-    if (!isLiveStreaming) return;
+    if (!isLiveStreaming && !isLiveStreamStarting) return;
     
+    liveStreamGeneration += 1;
     isLiveStreaming = false;
+    isLiveStreamStarting = false;
     stopLiveStreamTimers();
+    liveAttackScenario = null;
     pendingLiveLogs = [];
     updateLiveStreamControls();
     releaseLiveStreamOwnership();
@@ -966,14 +1008,16 @@ function updateLiveStreamControls() {
     const pauseBtn = document.getElementById('pause-btn');
 
     if (liveBtn) {
-        liveBtn.disabled = isLiveStreaming;
+        liveBtn.disabled = isLiveStreaming || isLiveStreamStarting;
         liveBtn.innerHTML = isLiveStreaming
             ? '<i class="fas fa-circle"></i> Live'
+            : isLiveStreamStarting
+                ? '<i class="fas fa-spinner fa-spin"></i> Starting'
             : '<i class="fas fa-play"></i> Start Live Stream';
     }
 
     if (pauseBtn) {
-        pauseBtn.disabled = !isLiveStreaming;
+        pauseBtn.disabled = !isLiveStreaming && !isLiveStreamStarting;
     }
 }
 
@@ -1006,53 +1050,53 @@ window.addEventListener('beforeunload', () => {
     }
 });
 
-function addNewLiveLog() {
-    if (!isLiveStreaming) return;
+function addNewLiveLog(generation = liveStreamGeneration) {
+    if (!isLiveStreaming || generation !== liveStreamGeneration) return;
 
-    const attackTypes = [
-        'XSS',
-        'SQL Injection',
-        'Port Scan',
-        'Brute Force',
-        'DDoS',
-        'Phishing',
-        'Credential Stuffing',
-        'Password Spraying',
-        'Malware',
-        'PowerShell Abuse',
-        'Ransomware',
-        'Microsoft Outlook Exploit',
-        'Apache Struts Exploit',
-        'Exchange Server Exploit',
-        'Log4Shell Exploit'
-    ];
     const severities = ['critical', 'high', 'medium', 'low'];
-    const attackType = attackTypes[Math.floor(Math.random() * attackTypes.length)];
-    const targetSystem = ['web-server-01', 'db-server-01', 'auth-server-01', 'api-gateway', 'firewall-01'][Math.floor(Math.random() * 5)];
+    if (!liveAttackScenario || liveAttackScenario.remaining <= 0) {
+        liveAttackScenario = buildLiveAttackScenario(liveStreamThresholdSettings || DEFAULT_LIVE_STREAM_SETTINGS);
+    }
+
+    const attackType = liveAttackScenario.attackType;
+    const targetSystem = liveAttackScenario.targetSystem;
+    const sequenceNumber = liveAttackScenario.total - liveAttackScenario.remaining + 1;
+    const isEscalating = sequenceNumber >= Math.max(1, Number(liveStreamThresholdSettings?.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD);
     
     const newLog = {
-        id: Date.now(),
+        id: `${Date.now()}-${sequenceNumber}`,
         timestamp: new Date().toISOString(),
         attackType,
-        sourceIP: generateIP(),
+        sourceIP: liveAttackScenario.sourceIP,
         targetSystem,
-        severity: severities[Math.floor(Math.random() * severities.length)],
-        country: ['USA', 'China', 'Russia', 'Germany', 'India', 'Brazil'][Math.floor(Math.random() * 6)],
+        severity: isEscalating
+            ? (['SQL Injection', 'XSS', 'Malware', 'Ransomware', 'Log4Shell Exploit', 'Exchange Server Exploit'].includes(attackType) ? 'critical' : 'high')
+            : severities[Math.floor(Math.random() * severities.length)],
+        country: liveAttackScenario.country,
         description: buildLiveDescription(attackType, targetSystem),
         isBlocked: Math.random() > 0.5,
         userAgent: 'Live Stream',
         port: Math.floor(Math.random() * 65535),
         protocol: 'TCP',
-        mitreTechnique: getThreatContextForAttack(attackType).mitre
+        mitreTechnique: getThreatContextForAttack(attackType).mitre,
+        metadata: {
+            source: 'live-stream',
+            scenarioId: `${liveAttackScenario.attackType}-${liveAttackScenario.sourceIP}-${liveAttackScenario.targetSystem}`,
+            sequenceNumber,
+            sequenceTotal: liveAttackScenario.total,
+            incidentThreshold: liveStreamThresholdSettings?.createIncidentAfter || DEFAULT_INCIDENT_THRESHOLD
+        }
     };
+
+    liveAttackScenario.remaining -= 1;
     
     pendingLiveLogs.unshift(newLog);
-    scheduleLiveLogFlush();
+    scheduleLiveLogFlush(generation);
 }
 
-function scheduleLiveLogFlush() {
+function scheduleLiveLogFlush(generation = liveStreamGeneration) {
     clearTimeout(liveRenderTimer);
-    liveRenderTimer = setTimeout(flushLiveLogs, LIVE_RENDER_DEBOUNCE_MS);
+    liveRenderTimer = setTimeout(() => flushLiveLogs(generation), LIVE_RENDER_DEBOUNCE_MS);
 }
 
 async function getAlertThresholdSettings() {
@@ -1066,11 +1110,12 @@ async function getAlertThresholdSettings() {
         if (!response.ok || !data.success) throw new Error(data.message || 'Settings unavailable');
         return {
             failedLoginThreshold: Math.max(1, Number(data.settings?.alertConfig?.failedLoginThreshold) || DEFAULT_ALERT_SETTINGS.failedLoginThreshold),
-            otherAlertsThreshold: Math.max(1, Number(data.settings?.alertConfig?.otherAlertsThreshold) || DEFAULT_ALERT_SETTINGS.otherAlertsThreshold)
+            otherAlertsThreshold: Math.max(1, Number(data.settings?.alertConfig?.otherAlertsThreshold) || DEFAULT_ALERT_SETTINGS.otherAlertsThreshold),
+            createIncidentAfter: Math.max(1, Number(data.settings?.incidentConfig?.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD)
         };
     } catch (error) {
         console.warn('Alert threshold fallback:', error);
-        return { ...DEFAULT_ALERT_SETTINGS };
+        return { ...DEFAULT_LIVE_STREAM_SETTINGS };
     }
 }
 
@@ -1090,47 +1135,49 @@ function getLiveAlertCorrelationKey(log) {
     ].join('|');
 }
 
+function buildLiveAttackScenario(settings = DEFAULT_LIVE_STREAM_SETTINGS) {
+    const targetSystems = ['web-server-01', 'db-server-01', 'auth-server-01', 'api-gateway', 'firewall-01'];
+    const countries = ['USA', 'China', 'Russia', 'Germany', 'India', 'Brazil'];
+    const attackType = LIVE_ATTACK_SCENARIO_TYPES[liveAttackScenarioCursor % LIVE_ATTACK_SCENARIO_TYPES.length];
+    liveAttackScenarioCursor += 1;
+    const alertThreshold = attackType === 'Brute Force'
+        ? settings.failedLoginThreshold
+        : settings.otherAlertsThreshold;
+    const burstTarget = Math.max(
+        1,
+        Number(settings.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD,
+        Number(alertThreshold) || 1
+    );
+
+    return {
+        attackType,
+        sourceIP: generateIP(),
+        targetSystem: targetSystems[Math.floor(Math.random() * targetSystems.length)],
+        country: countries[Math.floor(Math.random() * countries.length)],
+        remaining: burstTarget,
+        total: burstTarget
+    };
+}
+
 function countSimilarLiveLogs(log) {
     const key = getLiveAlertCorrelationKey(log);
     return allLogs.filter(item => getLiveAlertCorrelationKey(item) === key).length;
 }
 
 async function maybePromoteLiveLogToAlert(logsToMerge) {
-    const settings = await getAlertThresholdSettings();
-    const candidates = logsToMerge.filter(log => !autoConvertedLiveLogIds.has(getLogId(log)));
-
-    for (const log of candidates) {
-        const threshold = getAlertThresholdForLog(log, settings);
-        const key = getLiveAlertCorrelationKey(log);
-        const similarCount = countSimilarLiveLogs(log);
-        const lastAlertedCount = Number(autoAlertCorrelationState[key] || 0);
-
-        if (similarCount < threshold || similarCount < lastAlertedCount + threshold) continue;
-
-        autoAlertCorrelationState[key] = similarCount;
-        autoConvertedLiveLogIds.add(getLogId(log));
-        try {
-            await createAlertFromLog(getLogId(log), {
-                title: 'Alert Generated from Live Attack',
-                message: `${log.attackType} alert created after ${similarCount}/${threshold} matching log${threshold === 1 ? '' : 's'}`,
-                meta: `${log.sourceIP} | ${log.targetSystem} | ${log.country}`,
-                systemGenerated: true,
-                source: 'live-stream-auto-threshold'
-            });
-        } catch (error) {
-            console.warn('Auto alert creation failed:', error);
-            autoConvertedLiveLogIds.delete(getLogId(log));
-            autoAlertCorrelationState[key] = lastAlertedCount;
-        }
-    }
+    // Backend threat analysis already creates alerts for live logs.
+    // Keeping this hook as a no-op prevents duplicate alert creation from the UI.
+    void logsToMerge;
+    return null;
 }
 
-function flushLiveLogs() {
-    if (!isLiveStreaming || pendingLiveLogs.length === 0) return;
+function flushLiveLogs(generation = liveStreamGeneration) {
+    if (!isLiveStreaming || generation !== liveStreamGeneration || pendingLiveLogs.length === 0) return;
 
     const newLogs = pendingLiveLogs.splice(0);
     persistLiveLogsToBackend(newLogs)
         .then(async (savedLogs) => {
+            if (!isLiveStreaming || generation !== liveStreamGeneration) return;
             const logsToMerge = savedLogs.length ? savedLogs : newLogs;
             allLogs = mergeLogs(logsToMerge, allLogs);
             saveStoredLogs();
@@ -1148,9 +1195,9 @@ function flushLiveLogs() {
                 });
             }
 
-            await maybePromoteLiveLogToAlert(logsToMerge);
         })
         .catch((error) => {
+            if (!isLiveStreaming || generation !== liveStreamGeneration) return;
             console.warn('Live log sync failed, keeping local copy only:', error);
             allLogs = mergeLogs(newLogs, allLogs);
             saveStoredLogs();
@@ -1940,11 +1987,6 @@ async function createAlertFromLog(logId, options = {}) {
                     title: result.incidentCreated ? 'Incident Auto-Created' : 'Incident Auto-Updated',
                     meta: result.incident?.title || `${log.attackType} | ${log.sourceIP}`
                 });
-            } else if (result.incidentThreshold && result.similarAlertCount != null) {
-                showNotification(`Similar alerts: ${result.similarAlertCount}/${result.incidentThreshold}`, 'info', {
-                    title: 'Incident Threshold Progress',
-                    meta: `${log.attackType} | ${log.sourceIP}`
-                });
             }
         }
     } catch (error) {
@@ -2019,11 +2061,6 @@ async function createAlertFromSelected() {
             showNotification(`Incident auto-created: threshold ${result.incidentThreshold || DEFAULT_INCIDENT_THRESHOLD} reached`, 'success', {
                 title: result.incidentCreated ? 'Incident Auto-Created' : 'Incident Auto-Updated',
                 meta: result.incident?.title || 'Correlated alert incident'
-            });
-        } else if (result.incidentThreshold && result.similarAlertCount != null) {
-            showNotification(`Similar alerts: ${result.similarAlertCount}/${result.incidentThreshold}`, 'info', {
-                title: 'Incident Threshold Progress',
-                meta: alert.attackType || 'Bulk alert'
             });
         }
     } catch (error) {

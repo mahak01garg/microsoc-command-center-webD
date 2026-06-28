@@ -4,6 +4,7 @@ const User = require('../models/User');
 const SystemSettings = require('../models/SystemSettings');
 const { recordAuditEvent } = require('../utils/auditLogger');
 const { sendIncidentAssignmentEmail } = require('../utils/approvalMailer');
+const { correlateExistingAlertsToIncidents } = require('./alertsController');
 
 function canAccessIncident(incident, user) {
   if (!incident || !user) return false;
@@ -29,6 +30,7 @@ function isSystemGeneratedIncident(incident = {}) {
 // @access  Private
 exports.getIncidents = async (req, res) => {
   try {
+    const incidentCorrelation = await correlateExistingAlertsToIncidents(req.user?.id, req, { limit: 1000 });
     const {
       page = 1,
       limit = 20,
@@ -110,7 +112,12 @@ exports.getIncidents = async (req, res) => {
       page: parseInt(page),
       totalPages,
       incidents,
-      stats
+      stats,
+      incidentCorrelation: {
+        createdCount: incidentCorrelation.filter(item => item.created).length,
+        linkedCount: incidentCorrelation.length,
+        incidents: incidentCorrelation
+      }
     });
   } catch (error) {
     console.error('Get incidents error:', error);
@@ -126,11 +133,17 @@ exports.getIncidents = async (req, res) => {
 // @access  Private
 exports.getIncidentStats = async (req, res) => {
   try {
+    const incidentCorrelation = await correlateExistingAlertsToIncidents(req.user?.id, req, { limit: 1000 });
     const stats = await Incident.getStatistics();
 
     res.status(200).json({
       success: true,
-      stats
+      stats,
+      incidentCorrelation: {
+        createdCount: incidentCorrelation.filter(item => item.created).length,
+        linkedCount: incidentCorrelation.length,
+        incidents: incidentCorrelation
+      }
     });
   } catch (error) {
     console.error('Get incident stats error:', error);

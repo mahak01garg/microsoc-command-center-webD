@@ -31,7 +31,7 @@ window.MICROSOC_PAGES = {
         "src": "js/app.js?v=20260623t"
       },
       {
-        "src": "js/dashboard.js?v=20260623d"
+        "src": "js/dashboard.js?v=20260628f"
       },
     ]
   },
@@ -44,7 +44,7 @@ window.MICROSOC_PAGES = {
         "src": "js/app.js?v=20260623t"
       },
       {
-        "src": "js/incidents.js?v=20260623t"
+        "src": "js/incidents.js?v=20260628d"
       },
       {
         "code": "\n        // Initialize incidents page\n        document.addEventListener('DOMContentLoaded', function() {\n            // Check authentication\n            const user = JSON.parse(localStorage.getItem('user'));\n            const token = localStorage.getItem(\"token\");\n            if (!token) {\n                window.location.href = 'login.html';\n                return;\n            }\n            \n            // Update user info\n            document.getElementById('user-name').textContent = user.name;\n            document.getElementById('user-role').textContent = user.role.charAt(0).toUpperCase() + user.role.slice(1);\n            \n            // Load incidents\n            loadIncidents();\n            \n            // Setup new incident form\n            document.getElementById('new-incident-form').addEventListener('submit', function(e) {\n                e.preventDefault();\n                createNewIncident();\n            });\n        });\n    "
@@ -60,7 +60,7 @@ window.MICROSOC_PAGES = {
         "src": "js/app.js?v=20260623t"
       },
       {
-        "src": "js/logs.js?v=20260623d"
+        "src": "js/logs.js?v=20260628c"
       },
       {
         "src": "data/mock-data.js"
@@ -132,7 +132,7 @@ window.MICROSOC_PAGES = {
         "src": "js/app.js?v=20260623t"
       },
       {
-        "src": "js/incidents.js?v=20260623t"
+        "src": "js/incidents.js?v=20260628d"
       },
       {
         "code": "\n        // Initialize incidents page\n        document.addEventListener('DOMContentLoaded', function() {\n            // Check authentication\n            const user = JSON.parse(localStorage.getItem('user'));\n            const token = localStorage.getItem(\"token\");\n            if (!token) {\n                window.location.href = 'login.html';\n                return;\n            }\n            \n            // Update user info\n            document.getElementById('user-name').textContent = user.name;\n            document.getElementById('user-role').textContent = user.role.charAt(0).toUpperCase() + user.role.slice(1);\n            \n            // Load incidents\n            loadIncidents();\n            \n            // Setup new incident form\n            document.getElementById('new-incident-form').addEventListener('submit', function(e) {\n                e.preventDefault();\n                createNewIncident();\n            });\n        });\n    "
@@ -148,7 +148,7 @@ window.MICROSOC_PAGES = {
         "src": "js/app.js?v=20260623t"
       },
       {
-        "src": "js/logs.js?v=20260623d"
+        "src": "js/logs.js?v=20260628c"
       },
       {
         "src": "data/mock-data.js"

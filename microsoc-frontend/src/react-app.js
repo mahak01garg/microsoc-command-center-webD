@@ -46,6 +46,11 @@
         incidents: [],
         timer: null
     };
+    let realtimeSocket = null;
+    let realtimeReconnectTimer = null;
+    let realtimeReconnectAttempt = 0;
+    let realtimeRoot = null;
+    let realtimeReconnectEnabled = true;
     let sidebarRepairTimer = null;
     const sidebarObservers = new WeakMap();
     let pageIntegrityObserver = null;
@@ -162,9 +167,187 @@
         });
     }
 
+    function escapeToastHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function installStackedNotificationSystem() {
+        if (!document.querySelector('#microsoc-stacked-toast-styles')) {
+            const style = document.createElement('style');
+            style.id = 'microsoc-stacked-toast-styles';
+            style.textContent = `
+                .toast-stack {
+                    position: fixed;
+                    top: 18px;
+                    right: 18px;
+                    z-index: 2147483000;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 10px;
+                    width: min(420px, calc(100vw - 24px));
+                    pointer-events: none;
+                }
+
+                .toast-stack .custom-notification {
+                    position: relative;
+                    top: auto;
+                    right: auto;
+                    width: 100%;
+                    pointer-events: auto;
+                    color: var(--toast-text, #f8fafc);
+                    background: var(--toast-bg, rgba(15, 23, 42, 0.96));
+                    border: 1px solid var(--toast-border, rgba(148, 163, 184, 0.22));
+                    box-shadow: var(--toast-shadow, 0 18px 40px rgba(2, 6, 23, 0.28));
+                }
+
+                .toast-stack .custom-notification .toast-copy strong {
+                    color: var(--toast-title, currentColor);
+                }
+
+                .toast-stack .custom-notification .toast-copy span,
+                .toast-stack .custom-notification .toast-copy small {
+                    color: var(--toast-copy, currentColor);
+                }
+
+                .toast-stack .custom-notification .toast-close {
+                    color: var(--toast-close, currentColor);
+                }
+
+                .toast-stack .custom-notification.notification-log {
+                    --toast-bg: linear-gradient(135deg, rgba(8, 47, 73, 0.98), rgba(14, 116, 144, 0.95));
+                    --toast-border: rgba(34, 211, 238, 0.5);
+                    --toast-icon-bg: rgba(34, 211, 238, 0.18);
+                    --toast-icon-color: #67e8f9;
+                    border-left: 5px solid #22d3ee;
+                }
+
+                .toast-stack .custom-notification.notification-log .toast-icon {
+                    background: var(--toast-icon-bg);
+                    color: var(--toast-icon-color);
+                }
+
+                .toast-stack .custom-notification.notification-alert {
+                    --toast-bg: linear-gradient(135deg, rgba(69, 26, 3, 0.98), rgba(154, 52, 18, 0.95));
+                    --toast-border: rgba(251, 146, 60, 0.55);
+                    --toast-icon-bg: rgba(251, 146, 60, 0.2);
+                    --toast-icon-color: #fed7aa;
+                    border-left: 5px solid #fb923c;
+                }
+
+                .toast-stack .custom-notification.notification-alert .toast-icon {
+                    background: var(--toast-icon-bg);
+                    color: var(--toast-icon-color);
+                }
+
+                .toast-stack .custom-notification.notification-incident {
+                    --toast-bg: linear-gradient(135deg, rgba(20, 83, 45, 0.98), rgba(15, 118, 110, 0.95));
+                    --toast-border: rgba(45, 212, 191, 0.55);
+                    --toast-icon-bg: rgba(45, 212, 191, 0.2);
+                    --toast-icon-color: #99f6e4;
+                    border-left: 5px solid #2dd4bf;
+                }
+
+                .toast-stack .custom-notification.notification-incident .toast-icon {
+                    background: var(--toast-icon-bg);
+                    color: var(--toast-icon-color);
+                }
+
+                body[data-theme="light"] .toast-stack .custom-notification,
+                html[data-theme="light"] .toast-stack .custom-notification {
+                    --toast-text: #0f172a;
+                    --toast-title: #0f172a;
+                    --toast-copy: #334155;
+                    --toast-close: #475569;
+                    --toast-shadow: 0 18px 38px rgba(15, 23, 42, 0.14);
+                }
+
+                body[data-theme="light"] .toast-stack .custom-notification.notification-log,
+                html[data-theme="light"] .toast-stack .custom-notification.notification-log {
+                    --toast-bg: linear-gradient(135deg, #ecfeff, #ffffff);
+                    --toast-border: rgba(8, 145, 178, 0.28);
+                    --toast-icon-bg: rgba(8, 145, 178, 0.12);
+                    --toast-icon-color: #0e7490;
+                    border-left-color: #0891b2;
+                }
+
+                body[data-theme="light"] .toast-stack .custom-notification.notification-alert,
+                html[data-theme="light"] .toast-stack .custom-notification.notification-alert {
+                    --toast-bg: linear-gradient(135deg, #fff7ed, #ffffff);
+                    --toast-border: rgba(234, 88, 12, 0.28);
+                    --toast-icon-bg: rgba(234, 88, 12, 0.12);
+                    --toast-icon-color: #c2410c;
+                    border-left-color: #ea580c;
+                }
+
+                body[data-theme="light"] .toast-stack .custom-notification.notification-incident,
+                html[data-theme="light"] .toast-stack .custom-notification.notification-incident {
+                    --toast-bg: linear-gradient(135deg, #ecfdf5, #ffffff);
+                    --toast-border: rgba(13, 148, 136, 0.28);
+                    --toast-icon-bg: rgba(13, 148, 136, 0.12);
+                    --toast-icon-color: #0f766e;
+                    border-left-color: #0d9488;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        window.showNotification = function (message, type = 'info', options = {}) {
+            let stack = document.getElementById('toast-stack');
+            if (!stack) {
+                stack = document.createElement('div');
+                stack.id = 'toast-stack';
+                stack.className = 'toast-stack';
+                document.body.appendChild(stack);
+            }
+
+            const notification = document.createElement('div');
+            const kind = String(options.kind || '').toLowerCase();
+            const kindClass = ['log', 'alert', 'incident'].includes(kind) ? ` notification-${kind}` : '';
+            notification.className = `custom-notification notification-${type}${kindClass}`;
+            const icons = {
+                success: 'fa-check-circle',
+                error: 'fa-shield-virus',
+                warning: 'fa-exclamation-triangle',
+                info: 'fa-info-circle'
+            };
+            const icon = icons[type] || icons.info;
+            const title = options.title || (type === 'error' ? 'Security Alert' : 'MicroSOC');
+            const meta = options.meta ? `<small>${escapeToastHtml(options.meta)}</small>` : '';
+
+            notification.innerHTML = `
+                <div class="toast-icon"><i class="fas ${icon}"></i></div>
+                <div class="toast-copy">
+                    <strong>${escapeToastHtml(title)}</strong>
+                    <span>${escapeToastHtml(message)}</span>
+                    ${meta}
+                </div>
+                <button class="toast-close" onclick="this.closest('.custom-notification').remove()" aria-label="Close notification">&times;</button>
+            `;
+
+            stack.appendChild(notification);
+            window.setTimeout(() => {
+                if (notification.parentElement) {
+                    notification.classList.add('leaving');
+                    notification.remove();
+                }
+            }, Number(options.duration) || 8000);
+        };
+    }
+
     function enhanceSecurityUi(route) {
         const mainContent = document.querySelector('.main-content');
+        installStackedNotificationSystem();
         installNotificationDropdown();
+        if (protectedRoutes.has(route)) {
+            connectRealtimeFeed(document.getElementById('legacy-page') || document);
+        } else {
+            closeRealtimeFeed();
+        }
         if (!mainContent) {
             document.querySelector('.ai-assistant')?.remove();
             return;
@@ -334,23 +517,30 @@
         const incidents = notificationBatch.incidents.splice(0);
 
         if (alerts.length && typeof window.showNotification === 'function') {
-            const criticalCount = alerts.filter((item) => String(item.severity).toLowerCase() === 'critical').length;
-            const highCount = alerts.filter((item) => String(item.severity).toLowerCase() === 'high').length;
-            const message = alerts.length === 1
-                ? (alerts[0].message || alerts[0].title || 'Security alert detected')
-                : `${alerts.length} alerts detected${criticalCount ? `, ${criticalCount} critical` : ''}${highCount ? `, ${highCount} high` : ''}`;
-            window.showNotification(message, criticalCount ? 'error' : 'warning', {
-                title: alerts.length === 1 ? (alerts[0].title || 'Threat Alert') : 'Alert Burst'
+            alerts.forEach((item, index) => {
+                const severity = String(item.severity).toLowerCase();
+                const type = severity === 'critical' ? 'error' : severity === 'high' ? 'warning' : 'info';
+                const message = item.message || item.description || item.title || 'Security alert detected';
+                window.setTimeout(() => {
+                    window.showNotification(message, type, {
+                        title: item.title || 'Threat Alert',
+                        meta: [item.attackType, item.sourceIP, item.targetSystem].filter(Boolean).join(' | ')
+                    });
+                }, index * 120);
             });
         }
 
         if (incidents.length && typeof window.showNotification === 'function') {
-            const criticalCount = incidents.filter((item) => String(item.severity).toLowerCase() === 'critical').length;
-            const message = incidents.length === 1
-                ? (incidents[0].title || 'Incident created')
-                : `${incidents.length} incidents updated${criticalCount ? `, ${criticalCount} critical` : ''}`;
-            window.showNotification(message, criticalCount ? 'error' : 'warning', {
-                title: incidents.length === 1 ? 'Incident Created' : 'Incident Burst'
+            incidents.forEach((item, index) => {
+                const severity = String(item.severity).toLowerCase();
+                const type = severity === 'critical' ? 'error' : severity === 'high' ? 'warning' : 'info';
+                const message = item.title || 'Incident created';
+                window.setTimeout(() => {
+                    window.showNotification(message, type, {
+                        title: 'Incident Created',
+                        meta: [item.status, item.severity, item.sourceIP].filter(Boolean).join(' | ')
+                    });
+                }, index * 120);
             });
         }
 
@@ -361,6 +551,166 @@
         notificationBatch[kind].push(payload);
         clearTimeout(notificationBatch.timer);
         notificationBatch.timer = setTimeout(flushNotificationBatch, NOTIFICATION_BATCH_WINDOW_MS);
+    }
+
+    function severityToNotificationType(severity) {
+        const value = String(severity || '').toLowerCase();
+        if (value === 'critical') return 'error';
+        if (value === 'high' || value === 'medium') return 'warning';
+        return 'info';
+    }
+
+    function notifySecurityLog(log = {}) {
+        if (typeof window.showNotification !== 'function') return;
+        const severity = String(log.severity || 'info').toUpperCase();
+        const message = `${severity} ${log.attackType || 'Security log'} from ${log.sourceIP || 'unknown source'}`;
+        window.showNotification(message, severityToNotificationType(log.severity), {
+            title: 'Security Log',
+            kind: 'log',
+            meta: [log.targetSystem, log.protocol, log.port ? `Port ${log.port}` : '', log.country].filter(Boolean).join(' | ')
+        });
+    }
+
+    function notifyAlert(alert = {}) {
+        if (typeof window.showNotification !== 'function') return;
+        window.showNotification(
+            alert.message || alert.description || alert.title || 'Security alert detected',
+            severityToNotificationType(alert.severity),
+            {
+                title: alert.title || 'Threat Alert',
+                kind: 'alert',
+                meta: [alert.attackType, alert.sourceIP, alert.targetSystem].filter(Boolean).join(' | ')
+            }
+        );
+    }
+
+    function notifyIncident(incident = {}, eventType = 'incident:new') {
+        if (typeof window.showNotification !== 'function') return;
+        window.showNotification(
+            incident.title || 'Incident created',
+            severityToNotificationType(incident.severity),
+            {
+                title: eventType === 'incident:updated' ? 'Incident Updated' : 'Incident Created',
+                kind: 'incident',
+                meta: [incident.status, incident.severity, incident.sourceIP].filter(Boolean).join(' | ')
+            }
+        );
+    }
+
+    function getRealtimeFeedUrl() {
+        try {
+            const apiUrl = new URL(window.MICROSOC_API_BASE_URL);
+            const wsProtocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+            return `${wsProtocol}//${apiUrl.host}/ws/threat-feed`;
+        } catch (error) {
+            console.warn('Realtime feed URL could not be built:', error);
+            return null;
+        }
+    }
+
+    function getRealtimeRoot() {
+        return realtimeRoot || document.getElementById('legacy-page') || document;
+    }
+
+    function closeRealtimeFeed() {
+        realtimeReconnectEnabled = false;
+        clearTimeout(realtimeReconnectTimer);
+        realtimeReconnectTimer = null;
+        realtimeReconnectAttempt = 0;
+
+        if (realtimeSocket) {
+            try {
+                realtimeSocket.close();
+            } catch (error) {
+                // Ignore socket shutdown errors during route changes or logout.
+            }
+        }
+
+        realtimeSocket = null;
+    }
+
+    function scheduleRealtimeReconnect() {
+        if (realtimeReconnectTimer) return;
+
+        const delay = Math.min(15000, 1000 * Math.max(1, realtimeReconnectAttempt + 1));
+        realtimeReconnectAttempt += 1;
+        realtimeReconnectTimer = setTimeout(() => {
+            realtimeReconnectTimer = null;
+            connectRealtimeFeed();
+        }, delay);
+    }
+
+    function handleRealtimePayload(payload) {
+        const root = getRealtimeRoot();
+
+        if (payload?.type === 'alert:new' && payload.alert) {
+            notifyAlert(payload.alert);
+            refreshLiveCounts(root);
+            return;
+        }
+
+        if ((payload?.type === 'incident:new' || payload?.type === 'incident:updated') && payload.incident) {
+            notifyIncident(payload.incident, payload.type);
+            refreshLiveCounts(root);
+            return;
+        }
+
+        if (payload?.type === 'new-log' && payload.log) {
+            notifySecurityLog(payload.log);
+            refreshLiveCounts(root);
+            return;
+        }
+
+        if (payload?.type === 'stats:updated') {
+            refreshLiveCounts(root);
+        }
+    }
+
+    function connectRealtimeFeed(root = document.getElementById('legacy-page') || document) {
+        realtimeRoot = root || document;
+        realtimeReconnectEnabled = true;
+
+        if (realtimeSocket && (realtimeSocket.readyState === WebSocket.OPEN || realtimeSocket.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
+
+        const wsUrl = getRealtimeFeedUrl();
+        if (!wsUrl) return;
+
+        try {
+            realtimeSocket = new WebSocket(wsUrl);
+        } catch (error) {
+            console.warn('Realtime feed connection failed to start:', error);
+            scheduleRealtimeReconnect();
+            return;
+        }
+
+        realtimeSocket.addEventListener('open', () => {
+            realtimeReconnectAttempt = 0;
+            clearTimeout(realtimeReconnectTimer);
+            realtimeReconnectTimer = null;
+            refreshLiveCounts(getRealtimeRoot());
+        });
+
+        realtimeSocket.addEventListener('message', (event) => {
+            try {
+                const payload = JSON.parse(event.data);
+                handleRealtimePayload(payload);
+            } catch (error) {
+                console.warn('Realtime feed message parse failed:', error);
+            }
+        });
+
+        realtimeSocket.addEventListener('close', () => {
+            realtimeSocket = null;
+            if (realtimeReconnectEnabled) {
+                scheduleRealtimeReconnect();
+            }
+        });
+
+        realtimeSocket.addEventListener('error', () => {
+            // The close handler manages reconnect timing.
+        });
     }
 
     function reorderSidebarNavigation() {
@@ -1297,8 +1647,12 @@
         const token = localStorage.getItem('token');
         const user = localStorage.getItem('user');
         if (protectedRoutes.has(route) && !token && !user) {
+            closeRealtimeFeed();
             navigateTo('login');
             return false;
+        }
+        if (!protectedRoutes.has(route)) {
+            closeRealtimeFeed();
         }
         return true;
     }
@@ -1551,8 +1905,8 @@
         try {
             const [incidentPayload, logPayload, alertPayload] = await Promise.all([
                 apiRequest('/incidents/stats'),
-                apiRequest('/logs/stats?timeRange=24h'),
-                apiRequest('/alerts/stats?timeRange=24h')
+                apiRequest('/logs/stats?timeRange=all'),
+                apiRequest('/alerts/stats?timeRange=all')
             ]);
             const statusCounts = Object.fromEntries((incidentPayload.stats?.statusCounts || []).map(item => [item._id, item.count]));
             const activeIncidents = (statusCounts.open || 0) + (statusCounts.in_progress || 0);

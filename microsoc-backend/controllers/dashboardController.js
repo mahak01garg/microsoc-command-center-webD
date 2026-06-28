@@ -9,49 +9,49 @@ const Alert = require('../models/Alert');
 exports.getDashboardStats = async (req, res) => {
   try {
     const now = new Date();
-    const twentyFourHoursAgo = new Date(now.getTime() - (24 * 60 * 60 * 1000));
     const sevenDaysAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
 
-    // Get counts in parallel
+    const activeLogQuery = { archived: { $ne: true } };
+    const activeIncidentQuery = { archived: { $ne: true } };
+
+    // Get counts in parallel. Dashboard summary cards use the same all-time
+    // active dataset as Security Logs/Incidents pages; trend deltas can still
+    // compare against recent windows.
     const [
-      totalLogs24h,
+      totalLogs,
       totalLogs7d,
-      activeIncidents,
+      openIncidents,
       criticalIncidents,
-      blockedAttacks24h,
+      blockedAttacks,
       avgResponseTime,
-      uniqueSources24h
+      uniqueSources
     ] = await Promise.all([
-      // Total logs in last 24 hours
-      Log.countDocuments({ timestamp: { $gte: twentyFourHoursAgo } }),
+      // Total active logs
+      Log.countDocuments(activeLogQuery),
       
       // Total logs in last 7 days
-      Log.countDocuments({ timestamp: { $gte: sevenDaysAgo } }),
+      Log.countDocuments({ ...activeLogQuery, timestamp: { $gte: sevenDaysAgo } }),
       
-      // Active incidents
-      Incident.countDocuments({ status: { $in: ['open', 'in_progress'] } }),
+      // Open incidents, matching the Incidents page "Open Incidents" card.
+      Incident.countDocuments({ ...activeIncidentQuery, status: 'open' }),
       
       // Critical incidents
-      Incident.countDocuments({ 
+      Incident.countDocuments({
+        ...activeIncidentQuery,
         status: { $in: ['open', 'in_progress'] },
         severity: 'critical'
       }),
       
-      // Blocked attacks in last 24 hours
-      Log.countDocuments({ 
-        timestamp: { $gte: twentyFourHoursAgo },
-        isBlocked: true
-      }),
+      // Blocked active attacks
+      Log.countDocuments({ ...activeLogQuery, isBlocked: true }),
       
       // Average response time (mock for now)
       Promise.resolve(2.4),
       
-      // Unique sources in last 24 hours
+      // Unique active sources
       Log.aggregate([
         {
-          $match: {
-            timestamp: { $gte: twentyFourHoursAgo }
-          }
+          $match: activeLogQuery
         },
         {
           $group: {
@@ -64,49 +64,49 @@ exports.getDashboardStats = async (req, res) => {
       ]).then(result => result[0]?.count || 0)
     ]);
 
-    const logStats24h = await Log.getStatistics('24h');
-    const severityDistribution = Array.isArray(logStats24h?.severityDistribution)
-      ? logStats24h.severityDistribution
+    const logStats = await Log.getStatistics('all');
+    const severityDistribution = Array.isArray(logStats?.severityDistribution)
+      ? logStats.severityDistribution
       : [];
-    const criticalLogs24h = severityDistribution.find(item => item._id === 'critical')?.count || 0;
-    const highLogs24h = severityDistribution.find(item => item._id === 'high')?.count || 0;
-    const mediumLogs24h = severityDistribution.find(item => item._id === 'medium')?.count || 0;
-    const alertCount24h = await Alert.countDocuments({
-      deletedAt: { $exists: false },
-      lastSeen: { $gte: twentyFourHoursAgo }
+    const criticalLogs = severityDistribution.find(item => item._id === 'critical')?.count || 0;
+    const highLogs = severityDistribution.find(item => item._id === 'high')?.count || 0;
+    const mediumLogs = severityDistribution.find(item => item._id === 'medium')?.count || 0;
+    const alertCount = await Alert.countDocuments({
+      deletedAt: { $exists: false }
     });
-    const blockedPercentage = totalLogs24h > 0 
-      ? Math.round((blockedAttacks24h / totalLogs24h) * 100)
+    const blockedPercentage = totalLogs > 0
+      ? Math.round((blockedAttacks / totalLogs) * 100)
       : 0;
 
-    const totalThreatSignals = totalLogs24h + alertCount24h + activeIncidents;
-    const totalSeveritySignals = Math.max(1, criticalLogs24h + highLogs24h + mediumLogs24h);
-    const criticalRatio = criticalLogs24h / totalSeveritySignals;
-    const highRatio = highLogs24h / totalSeveritySignals;
-    const mediumRatio = mediumLogs24h / totalSeveritySignals;
+    const totalThreatSignals = totalLogs + alertCount + openIncidents;
+    const totalSeveritySignals = Math.max(1, criticalLogs + highLogs + mediumLogs);
+    const criticalRatio = criticalLogs / totalSeveritySignals;
+    const highRatio = highLogs / totalSeveritySignals;
+    const mediumRatio = mediumLogs / totalSeveritySignals;
     const logPressure = Math.round(
       (criticalRatio * 45) +
       (highRatio * 25) +
       (mediumRatio * 12)
     );
-    const responsePressure = Math.min(35, activeIncidents * 5 + criticalIncidents * 8 + Math.round(Math.min(12, alertCount24h * 1.5)));
-    const resilienceBonus = Math.min(15, Math.round(blockedPercentage / 7)) + Math.min(10, Math.round(uniqueSources24h / 20));
+    const responsePressure = Math.min(35, openIncidents * 5 + criticalIncidents * 8 + Math.round(Math.min(12, alertCount * 1.5)));
+    const resilienceBonus = Math.min(15, Math.round(blockedPercentage / 7)) + Math.min(10, Math.round(uniqueSources / 20));
     const baseScore = 92;
 
-    const logsChange = totalLogs7d > 0
-      ? Math.round(((totalLogs24h - (totalLogs7d / 7)) / (totalLogs7d / 7)) * 100)
+    const recentDailyAverage = totalLogs7d > 0 ? totalLogs7d / 7 : 0;
+    const logsChange = recentDailyAverage > 0
+      ? Math.round(((totalLogs - recentDailyAverage) / recentDailyAverage) * 100)
       : 0;
-const securityScore = Math.max(
-  totalThreatSignals > 0 ? 20 : 45,
-  Math.min(
-    100,
-    baseScore
-      - logPressure
-      - responsePressure
-      + resilienceBonus
-      + (totalThreatSignals > 0 ? 4 : 0)
-  )
-);
+    const securityScore = Math.max(
+      totalThreatSignals > 0 ? 20 : 45,
+      Math.min(
+        100,
+        baseScore
+          - logPressure
+          - responsePressure
+          + resilienceBonus
+          + (totalThreatSignals > 0 ? 4 : 0)
+      )
+    );
 
 
     const stats = [
@@ -120,23 +120,23 @@ const securityScore = Math.max(
       },
       {
         icon: 'fa-broadcast-tower',
-        title: 'Total Logs (24h)',
-        value: totalLogs24h.toLocaleString(),
+        title: 'Total Logs',
+        value: totalLogs.toLocaleString(),
         change: `${logsChange > 0 ? '+' : ''}${logsChange}%`,
         changeType: logsChange > 0 ? 'negative' : 'positive',
         color: '#007bff'
       },
       {
         icon: 'fa-exclamation-triangle',
-        title: 'Active Incidents',
-        value: activeIncidents,
-        change: activeIncidents > 10 ? '+2' : '-1',
-        changeType: activeIncidents > 10 ? 'negative' : 'positive',
+        title: 'Open Incidents',
+        value: openIncidents,
+        change: openIncidents > 10 ? '+2' : '-1',
+        changeType: openIncidents > 10 ? 'negative' : 'positive',
         color: '#dc3545'
       },
       {
         icon: 'fa-skull-crossbones',
-        title: 'Critical Threats',
+        title: 'Critical Incidents',
         value: criticalIncidents,
         change: criticalIncidents > 0 ? '+1' : '0',
         changeType: criticalIncidents > 0 ? 'negative' : 'positive',
@@ -161,9 +161,9 @@ const securityScore = Math.max(
       {
         icon: 'fa-ban',
         title: 'Blocked Attacks',
-        value: blockedAttacks24h,
+        value: blockedAttacks.toLocaleString(),
         change: `${blockedPercentage}% blocked`,
-        changeType: blockedAttacks24h > 0 ? 'positive' : 'negative',
+        changeType: blockedAttacks > 0 ? 'positive' : 'negative',
         color: '#28a745'
       }
     ];

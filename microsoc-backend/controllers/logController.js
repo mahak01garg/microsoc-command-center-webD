@@ -185,7 +185,7 @@ exports.createLog = async (req, res) => {
 
     const log = await Log.create(logData);
     realtimeHub.broadcast({ type: 'new-log', log });
-    const job = threatPipeline.queueLogAnalysis(log, {
+    const pipelineResult = await threatPipeline.analyzeLogNow(log, {
       userId: req.user.id,
       source: 'api'
     });
@@ -203,10 +203,11 @@ exports.createLog = async (req, res) => {
     res.status(201).json({
       success: true,
       log,
-      jobId: job.id,
       pipeline: {
-        queued: true,
-        status: job.state
+        completed: true,
+        detections: pipelineResult.detections?.length || 0,
+        incidents: pipelineResult.incidents || [],
+        incidentCreated: Boolean((pipelineResult.incidents || []).some(item => item.created))
       }
     });
   } catch (error) {
@@ -341,16 +342,17 @@ exports.createBulkLogs = async (req, res) => {
       });
     }
 
-    // Add processed by to each log
+    // Normalize bulk/live-stream payloads the same way as single log creation so
+    // threshold correlation sees stable attack names, IPs, and target systems.
     const logsWithUser = logsData.map(log => ({
-      ...log,
+      ...threatPipeline.validateLogPayload(log),
       processedBy: req.user.id,
       processedAt: new Date()
     }));
 
     const logs = await Log.insertMany(logsWithUser);
     logs.forEach(log => realtimeHub.broadcast({ type: 'new-log', log }));
-    threatPipeline.queueBatchAnalysis(logs, {
+    const pipelineResults = await threatPipeline.analyzeBatchNow(logs, {
       userId: req.user.id,
       source: 'bulk'
     });
@@ -372,7 +374,14 @@ exports.createBulkLogs = async (req, res) => {
     res.status(201).json({
       success: true,
       count: logs.length,
-      logs
+      logs,
+      pipeline: {
+        completed: true,
+        analyzed: pipelineResults.length,
+        detections: pipelineResults.reduce((sum, result) => sum + (result.detections?.length || 0), 0),
+        incidents: pipelineResults.flatMap(result => result.incidents || []),
+        incidentCreated: pipelineResults.some(result => (result.incidents || []).some(item => item.created))
+      }
     });
   } catch (error) {
     console.error('Create bulk logs error:', error);
@@ -460,7 +469,7 @@ exports.generateMockLogs = async (req, res) => {
 
     const createdLogs = await Log.insertMany(logs);
     createdLogs.forEach(log => realtimeHub.broadcast({ type: 'new-log', log }));
-    threatPipeline.queueBatchAnalysis(createdLogs, {
+    const pipelineResults = await threatPipeline.analyzeBatchNow(createdLogs, {
       userId: req.user.id,
       source: 'mock'
     });
@@ -482,7 +491,14 @@ exports.generateMockLogs = async (req, res) => {
     res.status(201).json({
       success: true,
       count: createdLogs.length,
-      logs: createdLogs
+      logs: createdLogs,
+      pipeline: {
+        completed: true,
+        analyzed: pipelineResults.length,
+        detections: pipelineResults.reduce((sum, result) => sum + (result.detections?.length || 0), 0),
+        incidents: pipelineResults.flatMap(result => result.incidents || []),
+        incidentCreated: pipelineResults.some(result => (result.incidents || []).some(item => item.created))
+      }
     });
   } catch (error) {
     console.error('Generate mock logs error:', error);

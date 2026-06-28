@@ -1,10 +1,198 @@
 // Incidents Page JavaScript
 
 let incidents = [];
+let filteredIncidentResults = [];
+let currentIncidentPage = 1;
+let incidentItemsPerPage = 50;
+let incidentTotalPages = 1;
 let assignableUsersCache = [];
 const ARCHIVED_INCIDENTS_KEY = 'microsocArchivedIncidentIds';
 const INCIDENT_CACHE_KEY = 'microsocIncidentCache';
 const INCIDENT_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function installIncidentTableLayoutStyles() {
+    if (document.getElementById('incident-table-layout-styles')) return;
+
+    const style = document.createElement('style');
+    style.id = 'incident-table-layout-styles';
+    style.textContent = `
+        .incidents-table-responsive {
+            width: 100%;
+            overflow-x: auto;
+            overflow-y: hidden;
+        }
+
+        .incident-table-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            margin-top: 18px;
+            padding-top: 18px;
+            border-top: 1px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+
+        .incident-pagination-info,
+        .incident-count-info {
+            color: var(--text-secondary);
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .incident-pagination-controls,
+        .incident-items-per-page {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .incident-items-per-page select {
+            min-width: 128px;
+        }
+
+        #incidents-table {
+            width: 100%;
+            min-width: 1120px;
+            table-layout: fixed;
+        }
+
+        #incidents-table th:nth-child(1),
+        #incidents-table td:nth-child(1) {
+            width: 180px;
+        }
+
+        #incidents-table th:nth-child(2),
+        #incidents-table td:nth-child(2) {
+            width: 44%;
+        }
+
+        #incidents-table th:nth-child(3),
+        #incidents-table td:nth-child(3) {
+            width: 105px;
+        }
+
+        #incidents-table th:nth-child(4),
+        #incidents-table td:nth-child(4) {
+            width: 105px;
+        }
+
+        #incidents-table th:nth-child(5),
+        #incidents-table td:nth-child(5) {
+            width: 120px;
+        }
+
+        #incidents-table th:nth-child(6),
+        #incidents-table td:nth-child(6) {
+            width: 105px;
+        }
+
+        #incidents-table th:nth-child(7),
+        #incidents-table td:nth-child(7) {
+            width: 145px;
+        }
+
+        #incidents-table .incident-id-cell,
+        #incidents-table .incident-assignee-cell,
+        #incidents-table .incident-created-cell {
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        #incidents-table .incident-title-cell,
+        #incidents-table .incident-description {
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        #incidents-table .incident-description {
+            max-height: 9em;
+            overflow: hidden;
+            line-height: 1.45;
+        }
+
+        #incidents-table .incident-severity-cell .badge,
+        #incidents-table .incident-status-cell .status-badge {
+            white-space: nowrap;
+        }
+
+        #incidents-table .incident-actions-cell {
+            white-space: normal;
+        }
+
+        #incidents-table .incident-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 5px;
+            min-width: 130px;
+            max-width: 140px;
+        }
+
+        #incidents-table .incident-actions .btn {
+            flex: 0 0 auto;
+            width: 34px;
+            min-width: 34px;
+            height: 28px;
+            padding: 0;
+            justify-content: center;
+        }
+
+        @media (max-width: 1180px) {
+            #incidents-table {
+                min-width: 1040px;
+            }
+
+            #incidents-table th:nth-child(2),
+            #incidents-table td:nth-child(2) {
+                width: 40%;
+            }
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function syncIncidentTableWrapper() {
+    const wrapper = document.querySelector('#incidents-table')?.closest('.table-responsive');
+    if (wrapper) wrapper.classList.add('incidents-table-responsive');
+}
+
+function ensureIncidentPaginationControls() {
+    const table = document.getElementById('incidents-table');
+    const cardBody = table?.closest('.card-body');
+    if (!cardBody || document.getElementById('incident-table-footer')) return;
+
+    const footer = document.createElement('div');
+    footer.id = 'incident-table-footer';
+    footer.className = 'incident-table-footer';
+    footer.innerHTML = `
+        <div class="incident-count-info">
+            Showing <span id="incident-showing-start">0</span>-<span id="incident-showing-end">0</span>
+            of <span id="incident-total-count">0</span> incidents
+        </div>
+        <div class="incident-pagination-controls">
+            <button class="btn btn-outline" onclick="prevIncidentPage()" id="incident-prev-btn" disabled>
+                <i class="fas fa-chevron-left"></i> Previous
+            </button>
+            <div class="incident-pagination-info">
+                Page <span id="incident-current-page">1</span> of <span id="incident-total-pages">1</span>
+            </div>
+            <button class="btn btn-outline" onclick="nextIncidentPage()" id="incident-next-btn" disabled>
+                Next <i class="fas fa-chevron-right"></i>
+            </button>
+        </div>
+        <div class="incident-items-per-page">
+            <select id="incident-items-per-page" onchange="changeIncidentItemsPerPage()">
+                <option value="25">25 per page</option>
+                <option value="50" selected>50 per page</option>
+                <option value="100">100 per page</option>
+                <option value="200">200 per page</option>
+            </select>
+        </div>
+    `;
+    cardBody.appendChild(footer);
+}
 
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'http://localhost:5001/api';
@@ -361,6 +549,9 @@ async function submitIncidentAssignment() {
 
 // Load Incidents
 async function loadIncidents() {
+    installIncidentTableLayoutStyles();
+    syncIncidentTableWrapper();
+    ensureIncidentPaginationControls();
     renderIncidentLoading();
     const cachedIncidents = filterArchivedIncidents(uniqueIncidents([
         ...getCachedIncidents(),
@@ -369,21 +560,12 @@ async function loadIncidents() {
     if (cachedIncidents.length) {
         incidents = cachedIncidents;
         syncIncidentRoleUi();
-        renderInciments(incidents);
+        renderInciments(incidents, { resetPage: true });
         renderIncidentStats(null, incidents);
     }
 
     try {
-        const query = '?limit=50';
-        const res = await fetch(`${getApiBaseUrl()}/incidents${query}`, {
-            headers: getAuthHeaders()
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-            throw new Error(data.message || 'Failed to load incidents');
-        }
+        const data = await fetchAllBackendIncidents();
 
         const backendIncidents = Array.isArray(data.incidents) ? data.incidents.map(normalizeIncident) : [];
         const localIncidents = getStoredLocalIncidents().map(normalizeIncident);
@@ -401,7 +583,7 @@ async function loadIncidents() {
         incidents = filterArchivedIncidents(mergedIncidents).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         cacheIncidents(incidents);
         syncIncidentRoleUi();
-        renderInciments(incidents);
+        renderInciments(incidents, { resetPage: true });
         renderIncidentStats(data.stats, incidents);
     } catch (err) {
         console.error("Failed to load incidents", err);
@@ -410,13 +592,53 @@ async function loadIncidents() {
             : filterArchivedIncidents(getStoredLocalIncidents().map(normalizeIncident));
         syncIncidentRoleUi();
         if (incidents.length) {
-            renderInciments(incidents);
+            renderInciments(incidents, { resetPage: true });
             renderIncidentStats(null, incidents);
         } else {
             renderIncidentError(err.message || 'No live incident data available.');
             renderIncidentStats();
         }
     }
+}
+
+async function fetchIncidentPage(page = 1, limit = 200) {
+    const params = new URLSearchParams({
+        page: String(page),
+        limit: String(limit)
+    });
+    const res = await fetch(`${getApiBaseUrl()}/incidents?${params.toString()}`, {
+        headers: getAuthHeaders()
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+        throw new Error(data.message || 'Failed to load incidents');
+    }
+
+    return data;
+}
+
+async function fetchAllBackendIncidents() {
+    const firstPage = await fetchIncidentPage(1);
+    const totalPages = Math.max(1, Number(firstPage.totalPages) || 1);
+    const allIncidents = Array.isArray(firstPage.incidents) ? [...firstPage.incidents] : [];
+
+    if (totalPages > 1) {
+        const pageResults = await Promise.all(
+            Array.from({ length: totalPages - 1 }, (_, index) => fetchIncidentPage(index + 2))
+        );
+        pageResults.forEach(page => {
+            if (Array.isArray(page.incidents)) {
+                allIncidents.push(...page.incidents);
+            }
+        });
+    }
+
+    return {
+        ...firstPage,
+        incidents: allIncidents,
+        count: allIncidents.length
+    };
 }
 
 function normalizeIncident(incident) {
@@ -512,18 +734,83 @@ function renderIncidentStats(stats, incidentList = incidents) {
 }
 
 
+function updateIncidentPaginationControls(totalItems = filteredIncidentResults.length, pageItems = []) {
+    incidentTotalPages = Math.max(1, Math.ceil(totalItems / incidentItemsPerPage));
+    if (currentIncidentPage > incidentTotalPages) currentIncidentPage = incidentTotalPages;
+
+    const start = totalItems ? ((currentIncidentPage - 1) * incidentItemsPerPage) + 1 : 0;
+    const end = totalItems ? start + pageItems.length - 1 : 0;
+
+    const setText = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+    };
+
+    setText('incident-showing-start', start);
+    setText('incident-showing-end', end);
+    setText('incident-total-count', totalItems);
+    setText('incident-current-page', currentIncidentPage);
+    setText('incident-total-pages', incidentTotalPages);
+
+    const prev = document.getElementById('incident-prev-btn');
+    const next = document.getElementById('incident-next-btn');
+    if (prev) prev.disabled = currentIncidentPage <= 1;
+    if (next) next.disabled = currentIncidentPage >= incidentTotalPages;
+
+    const perPage = document.getElementById('incident-items-per-page');
+    if (perPage && String(perPage.value) !== String(incidentItemsPerPage)) {
+        perPage.value = String(incidentItemsPerPage);
+    }
+}
+
+function getFilteredIncidents() {
+    const statusFilter = document.getElementById('filter-status')?.value || 'all';
+    const severityFilter = document.getElementById('filter-severity')?.value || 'all';
+    const searchTerm = (document.getElementById('search-incidents')?.value || '').trim().toLowerCase();
+
+    return incidents.filter(incident => {
+        const matchesStatus = statusFilter === 'all' || incident.status === statusFilter;
+        const matchesSeverity = severityFilter === 'all' || incident.severity === severityFilter;
+        const searchable = [
+            incident.id,
+            incident.title,
+            incident.description,
+            incident.assignedTo,
+            incident.severity,
+            incident.status
+        ].filter(Boolean).join(' ').toLowerCase();
+
+        return matchesStatus && matchesSeverity && (!searchTerm || searchable.includes(searchTerm));
+    });
+}
+
+function applyIncidentFilters({ resetPage = true } = {}) {
+    renderInciments(getFilteredIncidents(), { resetPage });
+}
+
 // Render Incidents Table
-function renderInciments(filteredIncidents = incidents) {
+function renderInciments(filteredIncidents = incidents, options = {}) {
     const tbody = document.querySelector('#incidents-table tbody');
     if (!tbody) return;
+    installIncidentTableLayoutStyles();
+    syncIncidentTableWrapper();
+    ensureIncidentPaginationControls();
+    if (options.resetPage) currentIncidentPage = 1;
+    filteredIncidentResults = Array.isArray(filteredIncidents) ? filteredIncidents : [];
+    incidentTotalPages = Math.max(1, Math.ceil(filteredIncidentResults.length / incidentItemsPerPage));
+    if (currentIncidentPage > incidentTotalPages) currentIncidentPage = incidentTotalPages;
+
+    const startIndex = (currentIncidentPage - 1) * incidentItemsPerPage;
+    const pageIncidents = filteredIncidentResults.slice(startIndex, startIndex + incidentItemsPerPage);
     const admin = isAdminUser();
 
-    if (!filteredIncidents.length) {
+    if (!filteredIncidentResults.length) {
         tbody.innerHTML = '<tr><td colspan="7">No incidents found.</td></tr>';
+        updateIncidentPaginationControls(0, []);
         return;
     }
     
-    tbody.innerHTML = filteredIncidents.map(incident => `
+    tbody.innerHTML = pageIncidents.map(incident => `
         ${(() => {
             const isLocal = String(incident.id).startsWith('local-');
             const disabledAttr = isLocal ? 'disabled title="Local incident - read only until backend syncs"' : '';
@@ -539,7 +826,7 @@ function renderInciments(filteredIncidents = incidents) {
             return `
         <tr data-id="${incident.id}">
             <td class="incident-id-cell">#${incident.id}</td>
-            <td>
+            <td class="incident-title-cell">
                 <strong>${incident.title}</strong>${localBadge}
                 <div class="incident-description">${incident.description}</div>
                 <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">
@@ -547,72 +834,69 @@ function renderInciments(filteredIncidents = incidents) {
                 </div>
                 ${cveRow}
             </td>
-            <td>
+            <td class="incident-severity-cell">
                 <span class="badge" style="background: ${getSeverityColor(incident.severity)}">
                     ${incident.severity.toUpperCase()}
                 </span>
             </td>
-            <td>
+            <td class="incident-status-cell">
                 <span class="status-badge status-${incident.status}">
                     ${incident.status.replace('_', ' ').toUpperCase()}
                 </span>
             </td>
-            <td>${incident.assignedTo || 'Unassigned'}</td>
-            <td>${formatDate(incident.createdAt)}</td>
-            <td>
-                <button class="btn btn-sm btn-outline" onclick="viewIncident('${incident.id}')" ${disabledAttr}>
-                    <i class="fas fa-eye"></i>
-                </button>
-                <button class="btn btn-sm btn-outline" onclick="viewIncidentTimeline('${incident.id}')" ${disabledAttr} title="View full timeline">
-                    <i class="fas fa-stream"></i>
-                </button>
-                <button class="btn btn-sm btn-outline ai-action-btn" onclick="triageIncidentWithAI('${incident.id}')" ${disabledAttr} title="AI Triage">
-                    <i class="fas fa-brain"></i>
-                </button>
-                ${admin ? `<button class="btn btn-sm btn-outline" onclick="openAssignIncidentModal('${incident.id}')" ${disabledAttr} title="Assign incident"><i class="fas fa-user-plus"></i></button>` : ''}
-                ${admin ? `<button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')" ${disabledAttr}><i class="fas fa-edit"></i></button>` : `<button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')" ${disabledAttr} title="Update Status"><i class="fas fa-pen"></i></button>`}
-                ${admin ? `<button class="btn btn-sm btn-outline" onclick="archiveIncident('${incident.id}')" ${disabledAttr} title="Archive incident"><i class="fas fa-archive"></i></button>` : ''}
+            <td class="incident-assignee-cell">${incident.assignedTo || 'Unassigned'}</td>
+            <td class="incident-created-cell">${formatDate(incident.createdAt)}</td>
+            <td class="incident-actions-cell">
+                <div class="incident-actions">
+                    <button class="btn btn-sm btn-outline" onclick="viewIncident('${incident.id}')" ${disabledAttr}>
+                        <i class="fas fa-eye"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline" onclick="viewIncidentTimeline('${incident.id}')" ${disabledAttr} title="View full timeline">
+                        <i class="fas fa-stream"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline ai-action-btn" onclick="triageIncidentWithAI('${incident.id}')" ${disabledAttr} title="AI Triage">
+                        <i class="fas fa-brain"></i>
+                    </button>
+                    ${admin ? `<button class="btn btn-sm btn-outline" onclick="openAssignIncidentModal('${incident.id}')" ${disabledAttr} title="Assign incident"><i class="fas fa-user-plus"></i></button>` : ''}
+                    ${admin ? `<button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')" ${disabledAttr}><i class="fas fa-edit"></i></button>` : `<button class="btn btn-sm btn-outline" onclick="editIncident('${incident.id}')" ${disabledAttr} title="Update Status"><i class="fas fa-pen"></i></button>`}
+                    ${admin ? `<button class="btn btn-sm btn-outline" onclick="archiveIncident('${incident.id}')" ${disabledAttr} title="Archive incident"><i class="fas fa-archive"></i></button>` : ''}
+                </div>
             </td>
         </tr>
             `;
         })()}
     `).join('');
+
+    updateIncidentPaginationControls(filteredIncidentResults.length, pageIncidents);
 }
 
 // Filter Incidents
 function filterIncidents() {
-    const statusFilter = document.getElementById('filter-status').value;
-    const severityFilter = document.getElementById('filter-severity').value;
-    
-    let filtered = incidents;
-    
-    if (statusFilter !== 'all') {
-        filtered = filtered.filter(incident => incident.status === statusFilter);
-    }
-    
-    if (severityFilter !== 'all') {
-        filtered = filtered.filter(incident => incident.severity === severityFilter);
-    }
-    
-    renderInciments(filtered);
+    applyIncidentFilters({ resetPage: true });
 }
 
 // Search Incidents
 function searchIncidents() {
-    const searchTerm = document.getElementById('search-incidents').value.toLowerCase();
-    
-    if (!searchTerm) {
-        renderInciments(incidents);
-        return;
-    }
-    
-    const filtered = incidents.filter(incident => 
-        incident.title.toLowerCase().includes(searchTerm) ||
-        incident.description.toLowerCase().includes(searchTerm) ||
-        (incident.assignedTo && incident.assignedTo.toLowerCase().includes(searchTerm))
-    );
-    
-    renderInciments(filtered);
+    applyIncidentFilters({ resetPage: true });
+}
+
+function prevIncidentPage() {
+    if (currentIncidentPage <= 1) return;
+    currentIncidentPage -= 1;
+    renderInciments(filteredIncidentResults, { resetPage: false });
+}
+
+function nextIncidentPage() {
+    if (currentIncidentPage >= incidentTotalPages) return;
+    currentIncidentPage += 1;
+    renderInciments(filteredIncidentResults, { resetPage: false });
+}
+
+function changeIncidentItemsPerPage() {
+    const selected = Number(document.getElementById('incident-items-per-page')?.value || 50);
+    incidentItemsPerPage = Number.isFinite(selected) && selected > 0 ? selected : 50;
+    currentIncidentPage = 1;
+    renderInciments(filteredIncidentResults.length ? filteredIncidentResults : getFilteredIncidents(), { resetPage: false });
 }
 
 // Open New Incident Modal
@@ -1090,6 +1374,9 @@ async function triageIncidentWithAI(id) {
 window.loadIncidents = loadIncidents;
 window.filterIncidents = filterIncidents;
 window.searchIncidents = searchIncidents;
+window.prevIncidentPage = prevIncidentPage;
+window.nextIncidentPage = nextIncidentPage;
+window.changeIncidentItemsPerPage = changeIncidentItemsPerPage;
 window.openNewIncidentModal = openNewIncidentModal;
 window.closeModal = closeModal;
 window.createNewIncident = createNewIncident;

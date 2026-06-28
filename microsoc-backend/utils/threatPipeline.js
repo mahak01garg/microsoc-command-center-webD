@@ -2,14 +2,18 @@ const Log = require('../models/Log');
 const Incident = require('../models/Incident');
 const Alert = require('../models/Alert');
 const SystemSettings = require('../models/SystemSettings');
+const User = require('../models/User');
+const crypto = require('crypto');
 const realtimeHub = require('./realtimeHub');
 const jobQueue = require('./jobQueue');
-const { sendCriticalAlertEmail } = require('./approvalMailer');
 
 const JOB_RETRY_LIMIT = 3;
 const JOB_BASE_BACKOFF_MS = 250;
 const AUTO_INCIDENT_TAG = 'auto-generated';
 const AUTO_SOURCE_TAG = 'auto-threat-pipeline';
+const MAX_TAG_LENGTH = 50;
+const INCIDENT_DESCRIPTION_LIMIT = 1900;
+const INCIDENT_TITLE_LIMIT = 190;
 const ATTACK_TYPE_ALIASES = {
   'sql injection': 'SQL Injection',
   'xss': 'XSS',
@@ -69,6 +73,35 @@ function sanitizeString(value) {
     .replace(/[<>]/g, '')
     .replace(/\u0000/g, '')
     .trim();
+}
+
+function sanitizeTag(value) {
+  return sanitizeString(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9:_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, MAX_TAG_LENGTH);
+}
+
+function compactCorrelationTag(...parts) {
+  const raw = parts.map(part => sanitizeString(part)).filter(Boolean).join(':');
+  const hash = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 24);
+  return `${AUTO_SOURCE_TAG}:${hash}`.slice(0, MAX_TAG_LENGTH);
+}
+
+function normalizeTags(tags = []) {
+  return Array.from(new Set(tags.map(tag => sanitizeTag(tag)).filter(Boolean)));
+}
+
+function truncateText(value, limit) {
+  const text = String(value || '').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 14)).trim()}... [truncated]`;
+}
+
+function normalizeIncidentSeverity(severity) {
+  const value = String(severity || 'medium').toLowerCase();
+  return ['critical', 'high', 'medium', 'low'].includes(value) ? value : 'medium';
 }
 
 function isValidIp(value) {
@@ -150,6 +183,10 @@ function makeAlert(rule, log, extras = {}) {
   };
 }
 
+function getDetectionAttackType(detection = {}, log = {}) {
+  return detection.alert?.attackType || detection.name || log.attackType || detection.id || 'Other';
+}
+
 function alertCorrelationKey(log, ruleId) {
   return `${AUTO_SOURCE_TAG}:${ruleId}:${log.sourceIP}:${log.targetSystem}`;
 }
@@ -164,7 +201,7 @@ async function persistAlert(log, detection, incidentResult) {
     status: 'new',
     sourceIP: log.sourceIP,
     targetSystem: log.targetSystem,
-    attackType: log.attackType,
+    attackType: getDetectionAttackType(detection, log),
     mitreTechnique: detection.mitreTechnique,
     ruleId: detection.id,
     correlationKey,
@@ -180,7 +217,7 @@ async function persistAlert(log, detection, incidentResult) {
     occurrenceCount: 1,
     firstSeen: now,
     lastSeen: now,
-    tags: [AUTO_INCIDENT_TAG, detection.id, log.attackType]
+    tags: normalizeTags([AUTO_INCIDENT_TAG, detection.id, getDetectionAttackType(detection, log)])
   };
 
   const alert = await Alert.findOne({ correlationKey, deletedAt: { $exists: false } });
@@ -214,12 +251,12 @@ function incidentTitleForAlert(alert) {
 }
 
 function incidentCategoryForAlert(alert) {
-  if (alert.ruleId === 'sql_injection' || alert.ruleId === 'xss_attack') return 'vulnerability';
+  if (alert.ruleId === 'sql_injection' || alert.ruleId === 'sql_injection_alert' || alert.ruleId === 'xss_attack' || alert.ruleId === 'xss_alert') return 'vulnerability';
   if (alert.ruleId === 'brute_force') return 'vulnerability';
-  if (alert.ruleId === 'malware_detected' || alert.ruleId === 'ransomware_detected') return 'malware';
-  if (alert.ruleId === 'phishing_detected') return 'phishing';
-  if (alert.ruleId === 'data_exfiltration') return 'data_breach';
-  if (alert.ruleId === 'port_scan' || alert.ruleId === 'anomaly_spike') return 'other';
+  if (alert.ruleId === 'malware_detected' || alert.ruleId === 'malware_alert' || alert.ruleId === 'ransomware_detected' || alert.ruleId === 'ransomware_alert') return 'malware';
+  if (alert.ruleId === 'phishing_detected' || alert.ruleId === 'phishing_alert') return 'phishing';
+  if (alert.ruleId === 'data_exfiltration' || alert.ruleId === 'data_exfiltration_alert') return 'data_breach';
+  if (alert.ruleId === 'port_scan' || alert.ruleId === 'port_scan_alert' || alert.ruleId === 'anomaly_spike') return 'other';
   if (alert.ruleId === 'multi_stage_attack') return 'insider_threat';
   return 'other';
 }
@@ -396,8 +433,14 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
     ...DEFAULT_PIPELINE_SETTINGS.alertConfig,
     ...(settings.alertConfig || {})
   };
+  const incidentThreshold = Math.max(
+    1,
+    Number(settings.incidentConfig?.createIncidentAfter) || DEFAULT_PIPELINE_SETTINGS.incidentConfig.createIncidentAfter
+  );
   const failedLoginThreshold = Math.max(1, Number(alertConfig.failedLoginThreshold) || DEFAULT_PIPELINE_SETTINGS.alertConfig.failedLoginThreshold);
   const otherAlertsThreshold = Math.max(1, Number(alertConfig.otherAlertsThreshold) || DEFAULT_PIPELINE_SETTINGS.alertConfig.otherAlertsThreshold);
+  const failedLoginTriggerThreshold = Math.min(failedLoginThreshold, incidentThreshold);
+  const otherAttackTriggerThreshold = Math.min(otherAlertsThreshold, incidentThreshold);
 
   const recent5m = await getRecentLogsForSource(log.sourceIP, 5);
   const recent10m = await getRecentLogsForSource(log.sourceIP, 10);
@@ -415,7 +458,7 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
     return item.attackType === 'Brute Force' || FAILED_LOGIN_PATTERN.test(text);
   }).length;
 
-  if (failedLoginCount >= failedLoginThreshold) {
+  if (failedLoginCount >= failedLoginTriggerThreshold) {
     detections.push({
       id: 'brute_force',
       name: 'Brute Force',
@@ -439,6 +482,8 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
           message: `${failedLoginCount} authentication failures detected from ${log.sourceIP} within 5 minutes.`,
           evidence: {
             threshold: failedLoginThreshold,
+            incidentThreshold,
+            triggerThreshold: failedLoginTriggerThreshold,
             recentAttempts: failedLoginCount,
             relatedLogs: recent5m.slice(0, 10).map(item => item._id)
           }
@@ -459,7 +504,7 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
     });
     const otherAlertCount = relatedOtherLogs.length;
 
-    if (otherAlertCount >= otherAlertsThreshold) {
+    if (otherAlertCount >= otherAttackTriggerThreshold) {
       const otherRule = otherAttackRule(effectiveAttackType);
       detections.push({
         id: otherRule.id,
@@ -484,6 +529,8 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
             message: `${otherAlertCount} ${effectiveAttackType} log${otherAlertCount === 1 ? '' : 's'} detected from ${log.sourceIP} within 10 minutes.`,
             evidence: {
               threshold: otherAlertsThreshold,
+              incidentThreshold,
+              triggerThreshold: otherAttackTriggerThreshold,
               recentAttempts: otherAlertCount,
               sample: log.description,
               relatedLogs: relatedOtherLogs.slice(0, 10).map(item => item._id)
@@ -498,39 +545,142 @@ async function detectThreats(log, settings = DEFAULT_PIPELINE_SETTINGS) {
 }
 
 function incidentCorrelationTag(detection, log) {
-  return `${AUTO_SOURCE_TAG}:${detection.id}:${log.sourceIP}`;
+  const attackType = getDetectionAttackType(detection, log);
+  const scope = getAlertCorrelationScope({
+    attackType,
+    sourceIP: log.sourceIP,
+    targetSystem: log.targetSystem
+  });
+  return compactCorrelationTag(attackType, scope.field || 'scope', scope.value || 'any');
+}
+
+function getAlertCorrelationScope(alert = {}) {
+  const attackType = String(alert.attackType || alert.title || '').toLowerCase();
+  const targetSystem = String(alert.targetSystem || '').trim();
+  const sourceIP = String(alert.sourceIP || '').trim();
+  const sourceScopedAttacks = [
+    'brute force',
+    'port scan',
+    'credential stuffing',
+    'password spraying'
+  ];
+  const targetScopedAttacks = [
+    'sql injection',
+    'xss',
+    'cross-site scripting',
+    'ddos',
+    'microsoft outlook exploit',
+    'outlook exploit',
+    'apache struts exploit',
+    'exchange server exploit',
+    'log4shell exploit',
+    'log4j exploit'
+  ];
+
+  if (targetScopedAttacks.some(type => attackType.includes(type)) && targetSystem) {
+    return {
+      field: 'targetSystem',
+      value: targetSystem,
+      label: attackType.includes('xss') || attackType.includes('cross-site scripting') ? 'web application/endpoint'
+        : attackType.includes('sql') ? 'API/endpoint'
+          : attackType.includes('outlook') ? 'mail server'
+            : attackType.includes('struts') ? 'web server'
+              : attackType.includes('exchange') ? 'Exchange server'
+                : 'target server/service'
+    };
+  }
+
+  if (sourceScopedAttacks.some(type => attackType.includes(type)) && sourceIP) {
+    return { field: 'sourceIP', value: sourceIP, label: 'source IP' };
+  }
+
+  if (targetSystem) return { field: 'targetSystem', value: targetSystem, label: 'target system' };
+  if (sourceIP) return { field: 'sourceIP', value: sourceIP, label: 'source IP' };
+  return { field: null, value: '', label: 'source or target' };
+}
+
+async function countSimilarAlertOccurrences(alert) {
+  const scope = getAlertCorrelationScope(alert);
+  const query = {
+    deletedAt: { $exists: false }
+  };
+
+  if (alert.attackType) {
+    query.attackType = alert.attackType;
+  }
+
+  if (scope.field && scope.value) {
+    query[scope.field] = scope.value;
+  }
+
+  const similarAlerts = await Alert.find(query).lean();
+  return {
+    similarAlerts,
+    similarAlertCount: similarAlerts.reduce((sum, item) => sum + Math.max(1, Number(item.occurrenceCount || 1)), 0),
+    scope
+  };
+}
+
+function getDetectionOccurrenceCount(detection) {
+  const evidence = detection?.alert?.evidence || {};
+  const counts = [
+    Number(evidence.recentAttempts),
+    Array.isArray(evidence.relatedLogs) ? evidence.relatedLogs.length : 0
+  ];
+  const bestCount = Math.max(0, ...counts.filter(Number.isFinite));
+  return bestCount || 1;
+}
+
+async function resolveIncidentCreator(userId) {
+  if (userId && User.db.base.Types.ObjectId.isValid(String(userId))) {
+    return userId;
+  }
+
+  const primaryAdmin = await User.findOne({ email: User.getPrimaryAdminEmail() }).select('_id').lean();
+  if (primaryAdmin?._id) return primaryAdmin._id;
+
+  const anyAdmin = await User.findOne({ role: 'admin' }).select('_id').lean();
+  if (anyAdmin?._id) return anyAdmin._id;
+
+  throw new Error('Cannot auto-create incident because no admin user exists for createdBy');
 }
 
 async function createOrUpdateIncident(log, detection, userId, settings = DEFAULT_PIPELINE_SETTINGS) {
   const severityEscalationEnabled = settings.incidentConfig?.severityEscalationEnabled !== false;
+  const createdBy = await resolveIncidentCreator(userId);
+  const attackType = getDetectionAttackType(detection, log);
   const correlationTag = incidentCorrelationTag(detection, log);
-  const relatedCves = relatedCvesForAttack(log.attackType || detection.alert?.title || detection.alert?.message);
+  const relatedCves = relatedCvesForAttack(`${attackType} ${detection.alert?.title || ''} ${detection.alert?.message || ''}`);
   const cveLines = relatedCves.length ? [`Related CVEs: ${relatedCves.join(', ')}`] : [];
+  const scope = getAlertCorrelationScope({
+    attackType,
+    sourceIP: log.sourceIP,
+    targetSystem: log.targetSystem
+  });
+  const incidentSeverity = normalizeIncidentSeverity(detection.alert.severity);
   const commonFields = {
-    title: incidentTitleForAlert(detection.alert),
-    description: [
+    title: truncateText(incidentTitleForAlert(detection.alert), INCIDENT_TITLE_LIMIT),
+    description: truncateText([
       detection.alert.message,
       '',
       `Source IP: ${log.sourceIP}`,
       `Target: ${log.targetSystem}`,
-      `Severity: ${detection.alert.severity.toUpperCase()}`,
+      `Severity: ${incidentSeverity.toUpperCase()}`,
       `MITRE Technique: ${detection.alert.mitreTechnique}`,
       ...cveLines,
       `Evidence: ${JSON.stringify(detection.alert.evidence)}`
-    ].join('\n'),
-    severity: detection.alert.severity,
+    ].join('\n'), INCIDENT_DESCRIPTION_LIMIT),
+    severity: incidentSeverity,
     status: 'open',
     category: incidentCategoryForAlert(detection.alert),
     sourceIP: log.sourceIP,
     affectedSystems: [log.targetSystem],
-    createdBy: userId,
+    createdBy,
     relatedLogs: [log._id],
     relatedCves,
-    impact: detection.alert.severity,
-    priority: detection.alert.severity,
-    tags: [AUTO_INCIDENT_TAG, correlationTag, detection.id, log.attackType]
-      .map(tag => sanitizeString(tag))
-      .filter(Boolean),
+    impact: incidentSeverity,
+    priority: incidentSeverity,
+    tags: normalizeTags([AUTO_INCIDENT_TAG, correlationTag, detection.id, attackType]),
     threatIntel: {
       riskScore: detection.riskScore,
       confidence: detection.confidence,
@@ -539,11 +689,15 @@ async function createOrUpdateIncident(log, detection, userId, settings = DEFAULT
     }
   };
 
-  let incident = await Incident.findOne({
-    sourceIP: log.sourceIP,
+  const incidentQuery = {
     status: { $in: ['open', 'in_progress'] },
     tags: correlationTag
-  });
+  };
+  if (scope.field === 'sourceIP' && scope.value) {
+    incidentQuery.sourceIP = scope.value;
+  }
+
+  let incident = await Incident.findOne(incidentQuery);
 
   const created = !incident;
 
@@ -551,15 +705,15 @@ async function createOrUpdateIncident(log, detection, userId, settings = DEFAULT
     incident = await Incident.create(commonFields);
     await incident.addTimelineEvent(
       'Auto-created from threat detection',
-      userId,
-      `${detection.alert.title} linked from ${log.attackType} on ${log.targetSystem}`
+      createdBy,
+      `${detection.alert.title} linked from ${attackType} on ${log.targetSystem}`
     );
   } else {
-    incident.description = `${incident.description}\n\n[Auto-linked] ${detection.alert.message}`;
+    incident.description = truncateText(`${incident.description}\n\n[Auto-linked] ${detection.alert.message}`, INCIDENT_DESCRIPTION_LIMIT);
     if (severityEscalationEnabled) {
-      incident.severity = detection.alert.severity;
-      incident.priority = detection.alert.severity;
-      incident.impact = detection.alert.severity;
+      incident.severity = incidentSeverity;
+      incident.priority = incidentSeverity;
+      incident.impact = incidentSeverity;
     }
     incident.threatIntel = {
       ...(incident.threatIntel || {}),
@@ -568,11 +722,11 @@ async function createOrUpdateIncident(log, detection, userId, settings = DEFAULT
       mitreTechnique: detection.mitreTechnique,
       recommendedAction: detection.recommendedAction
     };
-    incident.tags = Array.from(new Set([...(incident.tags || []), AUTO_INCIDENT_TAG, correlationTag, detection.id]));
+    incident.tags = normalizeTags([...(incident.tags || []), AUTO_INCIDENT_TAG, correlationTag, detection.id]);
     incident.relatedLogs = Array.from(new Set([...(incident.relatedLogs || []).map(String), String(log._id)]));
     await incident.addTimelineEvent(
       'Auto-linked threat detection',
-      userId,
+      createdBy,
       `${detection.alert.title} matched again for ${log.sourceIP}`
     );
   }
@@ -621,19 +775,13 @@ async function broadcastDetection(log, detection, alert, incidentResult) {
 }
 
 async function maybeNotifyCriticalAlert(log, alert, settings) {
-  const notifications = settings.notificationSettings || {};
-  const shouldNotify = notifications.emailNotifications !== false
-    && notifications.criticalAlertNotifications !== false
-    && String(alert?.severity || '').toLowerCase() === 'critical';
-
-  if (!shouldNotify) return null;
-
-  try {
-    return await sendCriticalAlertEmail({ alert, log });
-  } catch (error) {
-    console.error('Critical alert notification failed:', error.message);
-    return { sent: false, error: error.message };
-  }
+  // Keep alert delivery in-app only.
+  // Email notifications are intentionally disabled for live detections so the
+  // admin sees the toast/incident update without inbox noise.
+  void log;
+  void alert;
+  void settings;
+  return null;
 }
 
 async function processJob(job) {
@@ -644,14 +792,23 @@ async function processJob(job) {
     1,
     Number(settings.incidentConfig?.createIncidentAfter) || DEFAULT_PIPELINE_SETTINGS.incidentConfig.createIncidentAfter
   );
+  const incidentResults = [];
 
   for (const detection of detections) {
     const alert = await persistAlert(job.log, detection, null);
+    const correlationStats = await countSimilarAlertOccurrences(alert);
+    const detectionOccurrenceCount = getDetectionOccurrenceCount(detection);
+    const incidentSignalCount = Math.max(correlationStats.similarAlertCount, detectionOccurrenceCount);
     let incidentResult = null;
-    const shouldCreateIncident = (alert.occurrenceCount || 1) >= incidentThreshold;
+    const shouldCreateIncident = incidentSignalCount >= incidentThreshold;
 
     if (shouldCreateIncident) {
       incidentResult = await createOrUpdateIncident(job.log, detection, job.userId, settings);
+      incidentResults.push({
+        created: Boolean(incidentResult?.created),
+        incidentId: incidentResult?.incident?._id || incidentResult?.incident?.id || null,
+        title: incidentResult?.incident?.title || ''
+      });
     }
     await maybeNotifyCriticalAlert(job.log, alert, settings);
     await broadcastDetection(job.log, detection, alert, incidentResult);
@@ -660,6 +817,7 @@ async function processJob(job) {
   return {
     log: job.log,
     detections,
+    incidents: incidentResults,
     seriousDetections,
     settings: {
       alertConfig: settings.alertConfig,
@@ -722,9 +880,30 @@ function queueBatchAnalysis(logs = [], context = {}) {
   return logs.map(log => queueLogAnalysis(log, context));
 }
 
+async function analyzeLogNow(log, context = {}) {
+  return runWithRetry({
+    id: generateJobId(),
+    state: 'active',
+    log,
+    userId: context.userId || log.processedBy || null,
+    source: context.source || 'api',
+    createdAt: new Date().toISOString()
+  });
+}
+
+async function analyzeBatchNow(logs = [], context = {}) {
+  const results = [];
+  for (const log of logs) {
+    results.push(await analyzeLogNow(log, context));
+  }
+  return results;
+}
+
 module.exports = {
   validateLogPayload,
   queueLogAnalysis,
   queueBatchAnalysis,
+  analyzeLogNow,
+  analyzeBatchNow,
   detectThreats
 };
