@@ -54,14 +54,14 @@ const AnalyticsSchema = new mongoose.Schema({
   }],
   patterns: [{
     name: String,
-    type: String,
+    type: { type: String },
     confidence: Number,
     description: String,
     severity: String,
     frequency: String
   }],
   anomalies: [{
-    type: String,
+    type: { type: String },
     description: String,
     severity: String,
     timestamp: Date,
@@ -113,6 +113,12 @@ AnalyticsSchema.statics.generateDailyAnalytics = async function(date = new Date(
   const totalLogs = logs.length;
   const blockedAttacks = logs.filter(log => log.isBlocked).length;
   const criticalLogs = logs.filter(log => log.severity === 'critical').length;
+  const avgResponseTime = await Incident.getAverageResponseTimeMinutes({
+    createdAt: {
+      $gte: startOfDay,
+      $lte: endOfDay
+    }
+  });
   
   // Calculate attack distribution
   const attackDistribution = {
@@ -192,7 +198,7 @@ AnalyticsSchema.statics.generateDailyAnalytics = async function(date = new Date(
       totalLogs,
       blockedAttacks,
       criticalLogs,
-      avgResponseTime: Math.floor(Math.random() * 5) + 1, // Mock data
+      avgResponseTime: Number.isFinite(avgResponseTime) ? avgResponseTime : 0,
       attackSuccessRate: Math.floor((blockedAttacks / totalLogs) * 100) || 0,
       detectionRate: 95 + Math.floor(Math.random() * 5) // Mock data
     },

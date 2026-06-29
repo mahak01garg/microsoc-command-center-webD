@@ -66,6 +66,14 @@ const mergeCountryAttackMap = (countries = []) => {
     });
 };
 
+const formatResponseTime = (minutes) => {
+  const value = Number(minutes);
+  if (!Number.isFinite(value)) return 'N/A';
+  if (value < 1) return '<1m';
+  if (value < 60) return `${Math.round(value)}m`;
+  return `${(value / 60).toFixed(1)}h`;
+};
+
 // @desc    Get dashboard statistics
 // @route   GET /api/dashboard/stats
 // @access  Private
@@ -108,8 +116,8 @@ exports.getDashboardStats = async (req, res) => {
       // Blocked active attacks
       Log.countDocuments({ ...activeLogQuery, isBlocked: true }),
       
-      // Average response time (mock for now)
-      Promise.resolve(2.4),
+      // Real average time from incident creation to first response.
+      Incident.getAverageResponseTimeMinutes(),
       
       // Unique active sources
       Log.aggregate([
@@ -208,9 +216,9 @@ exports.getDashboardStats = async (req, res) => {
       {
         icon: 'fa-clock',
         title: 'Avg Response Time',
-        value: `${avgResponseTime}h`,
-        change: '-0.5h',
-        changeType: 'positive',
+        value: formatResponseTime(avgResponseTime),
+        change: Number.isFinite(Number(avgResponseTime)) ? 'Real incidents' : 'No responses yet',
+        changeType: Number.isFinite(Number(avgResponseTime)) && Number(avgResponseTime) > 60 ? 'negative' : 'positive',
         color: '#28a745'
       },
       {

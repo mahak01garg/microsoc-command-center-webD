@@ -213,7 +213,17 @@ IncidentSchema.methods.addTimelineEvent = function(action, user, note, attachmen
 // Method to update status with timeline event
 IncidentSchema.methods.updateStatus = async function(newStatus, user, note) {
   const oldStatus = this.status;
+  const now = new Date();
   this.status = newStatus;
+
+  if (
+    oldStatus === 'open' &&
+    ['in_progress', 'resolved', 'closed'].includes(newStatus) &&
+    !Number.isFinite(Number(this.metrics?.timeToRespond))
+  ) {
+    this.metrics = this.metrics || {};
+    this.metrics.timeToRespond = Math.max(0, Math.round((now - new Date(this.createdAt || now)) / 60000));
+  }
   
   // Update timeline
   await this.addTimelineEvent(
@@ -229,6 +239,50 @@ IncidentSchema.methods.updateStatus = async function(newStatus, user, note) {
   }
   
   return this.save();
+};
+
+function deriveIncidentResponseMinutes(incident) {
+  const directMetric = Number(incident?.metrics?.timeToRespond);
+  if (Number.isFinite(directMetric) && directMetric >= 0) return directMetric;
+
+  const createdAt = new Date(incident?.createdAt || incident?._id?.getTimestamp?.() || 0);
+  if (!Number.isFinite(createdAt.getTime())) return null;
+
+  const timeline = Array.isArray(incident?.timeline) ? incident.timeline : [];
+  const responseEvent = timeline
+    .filter(item => item?.timestamp)
+    .find(item => /status changed from open to (in_progress|resolved|closed)/i.test(String(item.action || '')));
+
+  if (responseEvent?.timestamp) {
+    const respondedAt = new Date(responseEvent.timestamp);
+    if (Number.isFinite(respondedAt.getTime()) && respondedAt >= createdAt) {
+      return Math.max(0, Math.round((respondedAt - createdAt) / 60000));
+    }
+  }
+
+  if (incident?.status && incident.status !== 'open' && incident?.updatedAt) {
+    const updatedAt = new Date(incident.updatedAt);
+    if (Number.isFinite(updatedAt.getTime()) && updatedAt >= createdAt) {
+      return Math.max(0, Math.round((updatedAt - createdAt) / 60000));
+    }
+  }
+
+  return null;
+}
+
+IncidentSchema.statics.getAverageResponseTimeMinutes = async function(query = {}) {
+  const incidents = await this.find({
+    archived: { $ne: true },
+    ...query
+  })
+    .select('createdAt updatedAt status timeline metrics')
+    .lean();
+  const responseTimes = incidents
+    .map(deriveIncidentResponseMinutes)
+    .filter(value => Number.isFinite(value) && value >= 0);
+
+  if (!responseTimes.length) return null;
+  return responseTimes.reduce((sum, value) => sum + value, 0) / responseTimes.length;
 };
 
 // Static method to get incident statistics
@@ -286,7 +340,13 @@ IncidentSchema.statics.getStatistics = async function() {
     }
   ]);
   
-  return stats[0];
+  const result = stats[0] || {};
+  const averageResponseMinutes = await this.getAverageResponseTimeMinutes();
+  result.avgResponseTime = Number.isFinite(averageResponseMinutes)
+    ? [{ _id: null, avg: averageResponseMinutes }]
+    : [];
+
+  return result;
 };
 
 module.exports = mongoose.model('Incident', IncidentSchema);

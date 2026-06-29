@@ -12,7 +12,8 @@ let analyticsData = {
     remediations: [],
     predictions: [],
     clusters: [],
-    aiInsights: []
+    aiInsights: [],
+    avgResponseTimeMinutes: null
 };
 
 const LOG_STORAGE_KEY = 'microsocSecurityLogs';
@@ -121,6 +122,24 @@ async function fetchAnalyticsLogsFromBackend() {
     }
 
     return (Array.isArray(firstPayload.logs) ? firstPayload.logs : []).map(normalizeAnalyticsLog);
+}
+
+async function hydrateAnalyticsOverview() {
+    const timeRange = document.getElementById('time-period')?.value || 'all';
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/analytics/overview?timeRange=${encodeURIComponent(timeRange)}&_=${Date.now()}`, {
+            headers: getAnalyticsAuthHeaders(),
+            cache: 'no-store'
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+            throw new Error(payload.message || 'Could not load analytics overview');
+        }
+        const avg = Number(payload.analytics?.incidentStats?.avgResponseTime?.[0]?.avg ?? payload.analytics?.metrics?.avgResponseTime);
+        analyticsData.avgResponseTimeMinutes = Number.isFinite(avg) && avg > 0 ? avg : null;
+    } catch (error) {
+        console.warn('Analytics overview sync failed:', error);
+    }
 }
 
 async function hydrateAnalyticsLogs() {
@@ -288,12 +307,19 @@ function initAnalytics() {
 
     syncAnalyticsLogsFromStorage();
     renderAnalyticsWidgets();
-    hydrateAnalyticsLogs().then(() => renderAnalyticsWidgets());
+    hydrateAnalyticsOverview().then(updateAnalyticsStats);
+    hydrateAnalyticsLogs().then(() => {
+        renderAnalyticsWidgets();
+        hydrateAnalyticsOverview().then(updateAnalyticsStats);
+    });
 
     window.addEventListener('microsoc:logs-updated', () => {
         syncAnalyticsLogsFromStorage();
         renderAnalyticsWidgets();
-        hydrateAnalyticsLogs().then(() => renderAnalyticsWidgets());
+        hydrateAnalyticsLogs().then(() => {
+            renderAnalyticsWidgets();
+            hydrateAnalyticsOverview().then(updateAnalyticsStats);
+        });
     });
 
     window.addEventListener('storage', event => {
@@ -1314,7 +1340,7 @@ async function generateAIInsights() {
 
 // Update Analytics
 async function updateAnalytics() {
-    await hydrateAnalyticsLogs();
+    await Promise.all([hydrateAnalyticsLogs(), hydrateAnalyticsOverview()]);
     renderAnalyticsWidgets({ notify: true });
 }
 
@@ -1364,10 +1390,12 @@ function exportAnalytics() {
 }
 
 // Update Analytics Stats
-function formatAnalyticsResponseTime(seconds) {
-    const value = Number(seconds) || 0;
-    if (value < 60) return `${Math.round(value)} sec`;
-    return `${(value / 60).toFixed(1)} min`;
+function formatAnalyticsResponseTime(minutes) {
+    const value = Number(minutes);
+    if (!Number.isFinite(value)) return 'N/A';
+    if (value < 1) return '<1m';
+    if (value < 60) return `${Math.round(value)} min`;
+    return `${(value / 60).toFixed(1)} h`;
 }
 
 function calculateAnalyticsRiskScore(logs) {
@@ -1396,14 +1424,13 @@ function updateAnalyticsStats() {
     const logs = getAnalyticsLogs();
     const total = logs.length;
     const blocked = logs.filter(log => log.isBlocked).length;
-    const criticalHigh = logs.filter(log => ['critical', 'high'].includes(log.severity)).length;
     const avgSeverity = total
         ? Math.round(logs.reduce((sum, log) => sum + severityWeight(log.severity), 0) / total)
         : 0;
     const stats = {
         detectionRate: total ? '100.0' : '0.0',
         preventionSuccess: total ? ((blocked / total) * 100).toFixed(1) : '0.0',
-        responseTime: total ? formatAnalyticsResponseTime(criticalHigh) : '0 sec',
+        responseTime: formatAnalyticsResponseTime(analyticsData.avgResponseTimeMinutes),
         aiConfidence: total ? String(Math.min(95, 45 + avgSeverity / 2).toFixed(1)) : '0.0'
     };
     

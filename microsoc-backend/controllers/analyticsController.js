@@ -27,10 +27,17 @@ exports.getOverview = async (req, res) => {
     // Get incident statistics
     const incidentStats = await Incident.getStatistics();
 
+    const analyticsPayload = analytics.toObject();
+    const realAvgResponseTime = incidentStats.avgResponseTime?.[0]?.avg;
+    analyticsPayload.metrics = {
+      ...(analyticsPayload.metrics || {}),
+      avgResponseTime: Number.isFinite(Number(realAvgResponseTime)) ? Number(realAvgResponseTime) : 0
+    };
+
     res.status(200).json({
       success: true,
       analytics: {
-        ...analytics.toObject(),
+        ...analyticsPayload,
         logStats,
         incidentStats
       }
