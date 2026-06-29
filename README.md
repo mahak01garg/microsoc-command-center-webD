@@ -531,13 +531,12 @@ These failed login records count toward the Audit Logs failure summary.
 
 If a field is not available, the UI hides it instead of showing noisy values like "Unknown" or "Not Captured".
 
-## Role Model
+## Supported Roles
 
 | Role | Capabilities |
 | --- | --- |
 | Admin | Full command view, user management, settings, archive, incident assignment, alert lifecycle |
 | Analyst | Investigation-focused access with limited admin controls hidden |
-| Viewer | Read-oriented access where applicable |
 
 ## Admin vs Analyst Access Flow
 
