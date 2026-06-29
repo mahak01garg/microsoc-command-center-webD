@@ -80,7 +80,7 @@ AuditLogSchema.index({ action: 1, timestamp: -1 });
 AuditLogSchema.index({ actor: 1, timestamp: -1 });
 AuditLogSchema.index({ result: 1, timestamp: -1 });
 
-AuditLogSchema.statics.getStatistics = async function(timeRange = '24h') {
+AuditLogSchema.statics.getStatistics = async function(timeRange = '24h', baseQuery = null) {
   const now = new Date();
   let startDate;
 
@@ -105,7 +105,9 @@ AuditLogSchema.statics.getStatistics = async function(timeRange = '24h') {
   }
 
   const pipeline = [];
-  if (startDate) {
+  if (baseQuery && Object.keys(baseQuery).length) {
+    pipeline.push({ $match: baseQuery });
+  } else if (startDate) {
     pipeline.push({ $match: { timestamp: { $gte: startDate } } });
   }
   pipeline.push({

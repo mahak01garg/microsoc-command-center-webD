@@ -11,6 +11,9 @@ const DASHBOARD_DELETED_LOG_IDS_KEY = 'microsocDeletedLogIds';
 const DASHBOARD_FETCH_TIMEOUT_MS = 30000;
 const DASHBOARD_SETTINGS_CACHE_KEY = 'microsocSystemSettingsCache';
 const DEFAULT_DASHBOARD_REFRESH_SECONDS = 30;
+const DASHBOARD_SCRIPT_VERSION = '20260628m';
+
+console.info(`MicroSOC dashboard.js ${DASHBOARD_SCRIPT_VERSION} loaded; attack map uses /dashboard/attack-map`);
 
 function getApiBaseUrl() {
     return window.MICROSOC_API_BASE_URL || 'https://microsoc-backend.onrender.com/api';
@@ -976,25 +979,47 @@ function renderEmptyTopAttackers() {
 async function loadAttackMap() {
     const container = document.getElementById('attack-map-container');
     if (!container) return;
-    renderAttackMap(loadDashboardStoredLogs());
+    if (container.dataset.attackMapSource !== 'server') {
+        container.innerHTML = '<div class="map-empty-state">Loading all-time attack map...</div>';
+    }
 
     try {
-        const firstPage = await fetchJsonWithTimeout(`${getApiBaseUrl()}/logs?limit=200&page=1&timeRange=all&_=${Date.now()}`, {
+        const firstPage = await fetchJsonWithTimeout(`${getApiBaseUrl()}/dashboard/attack-map?_=${Date.now()}`, {
             headers: getAuthHeaders(),
             cache: 'no-store'
-        }, 8000);
+        }, 15000);
         const { response, payload } = firstPage;
         if (!response.ok || !payload.success) {
             throw new Error(payload.message || 'Could not load attack map');
         }
-        const logs = Array.isArray(payload.logs) ? payload.logs : [];
-        renderAttackMap(filterDashboardDeletedLogs(logs));
+        container.dataset.attackMapSource = 'server';
+        renderAttackMapFromCountries(payload.countryAttackMap || [], payload.totalLogs);
         return;
     } catch (error) {
         console.error('Attack map failed:', error);
     }
 
-    renderAttackMap(loadDashboardStoredLogs());
+    if (container.dataset.attackMapSource !== 'server') {
+        container.innerHTML = '<div class="map-empty-state">Attack map unavailable. Backend aggregate could not be loaded.</div>';
+    }
+}
+
+function renderAttackMapFromCountries(countries = [], totalLogs = 0) {
+    const container = document.getElementById('attack-map-container');
+    if (!container) return;
+
+    const countrySummaries = (Array.isArray(countries) ? countries : [])
+        .filter(item => item && item.country)
+        .map(item => ({
+            country: getCountryDisplayName(item.country || 'Unknown'),
+            key: normalizeCountryKey(item.country || 'Unknown'),
+            count: Number(item.count || 0),
+            severityRank: Number(item.severityRank || 1)
+        }))
+        .filter(item => item.count > 0)
+        .sort((a, b) => b.count - a.count);
+
+    renderAttackMapSurface(countrySummaries, Number(totalLogs || 0));
 }
 
 function refreshAttackMap() {
@@ -1006,6 +1031,7 @@ function refreshAttackMap() {
 function renderAttackMap(logs) {
     const container = document.getElementById('attack-map-container');
     if (!container) return;
+    if (container.dataset.attackMapSource === 'server') return;
 
     const normalizedLogs = (Array.isArray(logs) ? logs : []).map((log) => ({
         country: getCountryDisplayName(log.country || 'Unknown'),
@@ -1023,6 +1049,13 @@ function renderAttackMap(logs) {
     }, {});
     const countrySummaries = Object.values(countryCounts).sort((a, b) => b.count - a.count);
     const totalAttacks = normalizedLogs.length;
+
+    renderAttackMapSurface(countrySummaries, totalAttacks);
+}
+
+function renderAttackMapSurface(countrySummaries = [], totalAttacks = 0) {
+    const container = document.getElementById('attack-map-container');
+    if (!container) return;
 
     const summaryMarkup = countrySummaries.length ? `
         <div class="attack-country-summary">
@@ -1066,7 +1099,7 @@ function renderAttackMap(logs) {
 function renderStaticAttackMap() {
     const container = document.getElementById('attack-map-container');
     if (!container) return;
-    renderAttackMap(loadDashboardStoredLogs());
+    loadAttackMap();
 }
 
 function loadMockAttackTrends() {

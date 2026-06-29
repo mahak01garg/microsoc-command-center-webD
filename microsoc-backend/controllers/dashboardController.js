@@ -3,6 +3,69 @@ const Incident = require('../models/Incident');
 const Analytics = require('../models/Analytics');
 const Alert = require('../models/Alert');
 
+const COUNTRY_ALIAS_MAP = {
+  us: 'US',
+  usa: 'US',
+  'u.s.a.': 'US',
+  america: 'US',
+  'united states': 'US',
+  'united states of america': 'US',
+  cn: 'CN',
+  china: 'CN',
+  ru: 'RU',
+  russia: 'RU',
+  'russian federation': 'RU',
+  de: 'DE',
+  germany: 'DE',
+  in: 'IN',
+  india: 'IN',
+  br: 'BR',
+  brazil: 'BR',
+  jp: 'JP',
+  japan: 'JP',
+  uk: 'UK',
+  'united kingdom': 'UK',
+  fr: 'FR',
+  france: 'FR',
+  kr: 'KR',
+  korea: 'KR',
+  'south korea': 'KR'
+};
+
+const normalizeCountryCode = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return 'Unknown';
+  return COUNTRY_ALIAS_MAP[raw.toLowerCase()] || raw.toUpperCase();
+};
+
+const mergeCountryAttackMap = (countries = []) => {
+  const merged = new Map();
+
+  countries.forEach((country) => {
+    const code = normalizeCountryCode(country._id || country.country);
+    if (!code || code === 'Unknown') return;
+    const current = merged.get(code) || {
+      country: code,
+      count: 0,
+      lastSeen: null,
+      severityRank: 1
+    };
+    const count = Number(country.count || 0);
+    current.count += count;
+    if (!current.lastSeen || new Date(country.lastSeen || 0) > new Date(current.lastSeen || 0)) {
+      current.lastSeen = country.lastSeen;
+    }
+    current.severityRank = Math.max(current.severityRank, Number(country.severityRank || 1));
+    merged.set(code, current);
+  });
+
+  return Array.from(merged.values())
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0);
+    });
+};
+
 // @desc    Get dashboard statistics
 // @route   GET /api/dashboard/stats
 // @access  Private
@@ -205,15 +268,11 @@ exports.getRealtimeData = async (req, res) => {
     .populate('assignedTo', 'name')
     .select('title severity status assignedTo updatedAt');
 
-    // Get top attackers for today
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const activeLogQuery = { archived: { $ne: true } };
 
     const topAttackers = await Log.aggregate([
       {
-        $match: {
-          timestamp: { $gte: todayStart }
-        }
+        $match: activeLogQuery
       },
       {
         $group: {
@@ -230,7 +289,7 @@ exports.getRealtimeData = async (req, res) => {
     const countryAttackMap = await Log.aggregate([
       {
         $match: {
-          timestamp: { $gte: todayStart },
+          ...activeLogQuery,
           country: { $exists: true, $nin: [null, ''] }
         }
       },
@@ -252,11 +311,7 @@ exports.getRealtimeData = async (req, res) => {
       lastSeen: attacker.lastSeen
     }));
 
-    const countryAttackMapData = countryAttackMap.map(country => ({
-      country: country._id,
-      count: country.count,
-      lastSeen: country.lastSeen
-    }));
+    const countryAttackMapData = mergeCountryAttackMap(countryAttackMap);
 
     res.status(200).json({
       success: true,
@@ -270,6 +325,57 @@ exports.getRealtimeData = async (req, res) => {
     });
   } catch (error) {
     console.error('Get realtime data error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+// @desc    Get all-time active attack map data
+// @route   GET /api/dashboard/attack-map
+// @access  Private
+exports.getAttackMap = async (req, res) => {
+  try {
+    const activeLogQuery = {
+      archived: { $ne: true },
+      country: { $exists: true, $nin: [null, '', 'Unknown'] }
+    };
+
+    const severityRankExpression = {
+      $switch: {
+        branches: [
+          { case: { $eq: ['$severity', 'critical'] }, then: 4 },
+          { case: { $eq: ['$severity', 'high'] }, then: 3 },
+          { case: { $eq: ['$severity', 'medium'] }, then: 2 }
+        ],
+        default: 1
+      }
+    };
+
+    const [countryAttackMap, totalLogs] = await Promise.all([
+      Log.aggregate([
+        { $match: activeLogQuery },
+        {
+          $group: {
+            _id: '$country',
+            count: { $sum: 1 },
+            lastSeen: { $max: '$timestamp' },
+            severityRank: { $max: severityRankExpression }
+          }
+        },
+        { $sort: { count: -1, lastSeen: -1 } }
+      ]),
+      Log.countDocuments({ archived: { $ne: true } })
+    ]);
+
+    res.status(200).json({
+      success: true,
+      totalLogs,
+      countryAttackMap: mergeCountryAttackMap(countryAttackMap)
+    });
+  } catch (error) {
+    console.error('Get attack map error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'

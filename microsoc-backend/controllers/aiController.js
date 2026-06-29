@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const Log = require('../models/Log');
 const Incident = require('../models/Incident');
 const SystemSettings = require('../models/SystemSettings');
+const Alert = require('../models/Alert');
+const AuditLog = require('../models/AuditLog');
 
 const AI_PROVIDER = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : 'openai')).toLowerCase();
 const DEFAULT_AI_BASE_URL = AI_PROVIDER === 'openrouter'
@@ -65,6 +67,188 @@ function redactSensitive(input) {
   }
 
   return clean(input || {});
+}
+
+function countBy(items = [], key = '_id') {
+  return Object.fromEntries((Array.isArray(items) ? items : []).map(item => [item[key] || 'unknown', item.count || 0]));
+}
+
+async function buildProjectContext(req, clientContext = {}) {
+  const activeLogQuery = { archived: { $ne: true } };
+  const activeIncidentQuery = { archived: { $ne: true } };
+  const activeAlertQuery = { deletedAt: { $exists: false } };
+
+  const severityRankExpression = {
+    $switch: {
+      branches: [
+        { case: { $eq: ['$severity', 'critical'] }, then: 4 },
+        { case: { $eq: ['$severity', 'high'] }, then: 3 },
+        { case: { $eq: ['$severity', 'medium'] }, then: 2 }
+      ],
+      default: 1
+    }
+  };
+
+  const [
+    settings,
+    totalLogs,
+    blockedLogs,
+    logSeverity,
+    logAttackTypes,
+    topSources,
+    countryMap,
+    recentLogs,
+    totalAlerts,
+    alertSeverity,
+    alertStatus,
+    recentAlerts,
+    totalIncidents,
+    incidentStatus,
+    incidentSeverity,
+    openIncidents,
+    auditTotal,
+    recentAudit
+  ] = await Promise.all([
+    SystemSettings.getSingleton().catch(() => null),
+    Log.countDocuments(activeLogQuery).catch(() => 0),
+    Log.countDocuments({ ...activeLogQuery, isBlocked: true }).catch(() => 0),
+    Log.aggregate([
+      { $match: activeLogQuery },
+      { $group: { _id: '$severity', count: { $sum: 1 } } }
+    ]).catch(() => []),
+    Log.aggregate([
+      { $match: activeLogQuery },
+      { $group: { _id: '$attackType', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 }
+    ]).catch(() => []),
+    Log.aggregate([
+      { $match: activeLogQuery },
+      { $group: { _id: '$sourceIP', count: { $sum: 1 }, country: { $first: '$country' }, lastSeen: { $max: '$timestamp' } } },
+      { $sort: { count: -1, lastSeen: -1 } },
+      { $limit: 10 }
+    ]).catch(() => []),
+    Log.aggregate([
+      { $match: { ...activeLogQuery, country: { $exists: true, $nin: [null, '', 'Unknown'] } } },
+      {
+        $group: {
+          _id: '$country',
+          count: { $sum: 1 },
+          lastSeen: { $max: '$timestamp' },
+          severityRank: { $max: severityRankExpression }
+        }
+      },
+      { $sort: { count: -1, lastSeen: -1 } }
+    ]).catch(() => []),
+    Log.find(activeLogQuery)
+      .sort({ timestamp: -1 })
+      .limit(12)
+      .select('timestamp attackType sourceIP targetSystem severity isBlocked country description')
+      .lean()
+      .catch(() => []),
+    Alert.countDocuments(activeAlertQuery).catch(() => 0),
+    Alert.aggregate([
+      { $match: activeAlertQuery },
+      { $group: { _id: '$severity', count: { $sum: 1 } } }
+    ]).catch(() => []),
+    Alert.aggregate([
+      { $match: activeAlertQuery },
+      { $group: { _id: '$status', count: { $sum: 1 } } }
+    ]).catch(() => []),
+    Alert.find(activeAlertQuery)
+      .sort({ lastSeen: -1, createdAt: -1 })
+      .limit(8)
+      .select('title severity status sourceIP targetSystem attackType occurrenceCount firstSeen lastSeen')
+      .lean()
+      .catch(() => []),
+    Incident.countDocuments(activeIncidentQuery).catch(() => 0),
+    Incident.aggregate([
+      { $match: activeIncidentQuery },
+      { $group: { _id: '$status', count: { $sum: 1 } } }
+    ]).catch(() => []),
+    Incident.aggregate([
+      { $match: activeIncidentQuery },
+      { $group: { _id: '$severity', count: { $sum: 1 } } }
+    ]).catch(() => []),
+    Incident.find({ ...activeIncidentQuery, status: { $in: ['open', 'in_progress'] } })
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .limit(8)
+      .select('title severity status sourceIP priority updatedAt createdAt')
+      .lean()
+      .catch(() => []),
+    AuditLog.countDocuments({}).catch(() => 0),
+    AuditLog.find({})
+      .sort({ timestamp: -1 })
+      .limit(8)
+      .select('timestamp actorName actorRole action module result details')
+      .lean()
+      .catch(() => [])
+  ]);
+
+  const settingsObject = settings?.toObject ? settings.toObject() : (settings || {});
+  const blockedPct = totalLogs > 0 ? Math.round((blockedLogs / totalLogs) * 100) : 0;
+
+  const requestUser = req.user?.toObject ? req.user.toObject() : (req.user || {});
+  const safeUser = {
+    id: String(requestUser._id || requestUser.id || clientContext.user?.id || ''),
+    name: clientContext.user?.name || requestUser.name,
+    email: clientContext.user?.email || requestUser.email,
+    role: clientContext.user?.role || requestUser.role
+  };
+
+  return redactSensitive({
+    product: {
+      name: 'MicroSOC Command Center',
+      purpose: 'SOC dashboard for security logs, alert correlation, incident management, analytics, audit logs, settings, users, notifications, and AI-assisted triage/reporting.',
+      frontend: 'React shell loading legacy page modules from microsoc-frontend/src/pages.js and microsoc-frontend/js/*.js',
+      backend: 'Express/Mongoose API with MongoDB, auth-protected routes, threshold-driven alert/incident automation, OpenRouter/OpenAI-compatible AI provider.',
+      importantRules: [
+        'Do not invent data. Use the projectSnapshot counts when answering operational questions.',
+        'Alerts are generated only when thresholds are met: Brute Force uses failedLoginThreshold; other attack types use otherAlertsThreshold.',
+        'Incidents are created only after alert occurrence count reaches createIncidentAfter.',
+        'Attack map is all-time active logs grouped by normalized country aliases.',
+        'AI local fallback is disabled unless AI_ALLOW_LOCAL_FALLBACK=true; user wants provider-generated answers.'
+      ]
+    },
+    user: safeUser,
+    clientContext,
+    settings: {
+      generalSettings: settingsObject.generalSettings,
+      alertConfig: settingsObject.alertConfig,
+      incidentConfig: settingsObject.incidentConfig,
+      aiSettings: settingsObject.aiSettings,
+      notificationSettings: settingsObject.notificationSettings
+    },
+    snapshot: {
+      generatedAt: new Date().toISOString(),
+      logs: {
+        total: totalLogs,
+        blocked: blockedLogs,
+        blockedPct,
+        severity: countBy(logSeverity),
+        topAttackTypes: logAttackTypes.map(item => ({ attackType: item._id, count: item.count })),
+        topSources: topSources.map(item => ({ sourceIP: item._id, count: item.count, country: item.country, lastSeen: item.lastSeen })),
+        countryMap: countryMap.map(item => ({ country: item._id, count: item.count, severityRank: item.severityRank, lastSeen: item.lastSeen })),
+        recent: recentLogs
+      },
+      alerts: {
+        total: totalAlerts,
+        severity: countBy(alertSeverity),
+        status: countBy(alertStatus),
+        recent: recentAlerts
+      },
+      incidents: {
+        total: totalIncidents,
+        status: countBy(incidentStatus),
+        severity: countBy(incidentSeverity),
+        openOrInProgress: openIncidents
+      },
+      auditLogs: {
+        total: auditTotal,
+        recent: recentAudit
+      }
+    }
+  });
 }
 
 function severityScore(severity) {
@@ -672,25 +856,10 @@ exports.chat = async (req, res) => {
     return sendAiDisabled(res, 'AI analysis is disabled in SOC settings.');
   }
 
-  const recentAlerts = await Log.find()
-    .sort({ timestamp: -1 })
-    .limit(20)
-    .select('timestamp attackType sourceIP targetSystem severity isBlocked country description')
-    .lean()
-    .catch(() => []);
-  const openIncidents = await Incident.find({ status: { $in: ['open', 'in_progress'] } })
-    .sort({ createdAt: -1 })
-    .limit(10)
-    .select('title severity status sourceIP priority')
-    .lean()
-    .catch(() => []);
+  const projectContext = await buildProjectContext(req, req.body.context || {});
   const payload = {
     message,
-    context: {
-      ...(req.body.context || {}),
-      recentAlerts,
-      openIncidents
-    }
+    context: projectContext
   };
 
   try {
@@ -699,7 +868,10 @@ exports.chat = async (req, res) => {
         'You are MicroSOC AI, the built-in SOC assistant for MicroSOC Command Center.',
         'Identity rule: if asked who you are, say you are MicroSOC AI. Never claim to be an animal, owl, generic chatbot, or unrelated persona.',
         'Respond naturally. If the user asks casual small-talk, answer casually without forcing SOC triage.',
-        'For security operations questions, give practical next actions. You can explain attacks, summarize recent alerts, suggest mitigations, assess severity, and reference MITRE-style techniques.',
+        'You have project-wide MicroSOC context in context.product, context.settings, and context.snapshot. Treat that as the source of truth for this app and its current data.',
+        'For security operations questions, give practical next actions. You can explain logs, alerts, incidents, audit activity, dashboard metrics, thresholds, settings, attack map, top attackers, AI configuration, notifications, and remediation.',
+        'When asked about current counts or status, use context.snapshot exactly. If a value is absent, say it is not available instead of guessing.',
+        'When asked how MicroSOC works, use context.product and context.settings. Mention threshold logic accurately.',
         'If asked about the logged-in user, use context.user when available and do not invent personal details.',
         'Use JSON with answer and nextActions. Keep answer under 120 words unless the user asks for detail.'
       ].join(' '),

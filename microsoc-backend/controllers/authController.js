@@ -7,6 +7,30 @@ const {
   sendAccessDecisionEmail
 } = require('../utils/approvalMailer');
 
+async function recordLoginFailure(req, email, reason, user = null) {
+  const normalizedEmail = String(email || '').trim().toLowerCase() || 'unknown';
+  await recordAuditEvent(req, {
+    actor: user?._id || null,
+    actorName: user?.name || 'Unknown User',
+    actorEmail: user?.email || normalizedEmail,
+    actorRole: user?.role || 'unknown',
+    action: 'User Login Failed',
+    module: 'auth',
+    targetType: 'Login Attempt',
+    targetId: normalizedEmail,
+    targetLabel: normalizedEmail,
+    result: 'failure',
+    details: `Authentication failed for ${normalizedEmail}: ${reason}`,
+    ipAddress: pickRequestIp(req),
+    userAgent: req.headers?.['user-agent'] || '',
+    metadata: {
+      reason,
+      authenticationMethod: 'Email + Password',
+      emailKnown: Boolean(user)
+    }
+  });
+}
+
 // @desc    Register user
 // @route   POST /api/auth/register
 // @access  Public
@@ -87,6 +111,7 @@ exports.login = async (req, res) => {
     // Check if user exists
     const user = await User.findOne({ email: normalizedEmail }).select('+password');
     if (!user) {
+      await recordLoginFailure(req, normalizedEmail, 'Invalid credentials: user not found');
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
@@ -95,6 +120,7 @@ exports.login = async (req, res) => {
 
     // Check if user is active
     if (!user.isActive) {
+      await recordLoginFailure(req, normalizedEmail, 'Account is deactivated', user);
       return res.status(403).json({
         success: false,
         message: 'Account is deactivated'
@@ -102,6 +128,7 @@ exports.login = async (req, res) => {
     }
 
     if (user.approvalStatus === 'pending') {
+      await recordLoginFailure(req, normalizedEmail, 'Account pending admin approval', user);
       return res.status(403).json({
         success: false,
         message: 'Your account is waiting for admin approval'
@@ -109,6 +136,7 @@ exports.login = async (req, res) => {
     }
 
     if (user.approvalStatus === 'rejected') {
+      await recordLoginFailure(req, normalizedEmail, 'Account approval rejected', user);
       return res.status(403).json({
         success: false,
         message: 'Your account approval request was rejected'
@@ -118,6 +146,7 @@ exports.login = async (req, res) => {
     // Check password
     const isMatch = await user.matchPassword(password);
     if (!isMatch) {
+      await recordLoginFailure(req, normalizedEmail, 'Invalid credentials: password mismatch', user);
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'

@@ -11,9 +11,12 @@ let liveStreamFirstTimer = null;
 let liveRenderTimer = null;
 let liveStreamThresholdSettings = null;
 let liveAttackScenario = null;
+let liveAttackScenarioPool = [];
 let liveAttackScenarioCursor = 0;
 let liveStreamGeneration = 0;
 let pendingLiveLogs = [];
+let liveLastScenarioKey = '';
+let liveLastAttackType = '';
 let autoConvertedLiveLogIds = new Set();
 let autoAlertCorrelationState = {};
 let currentPage = 1;
@@ -970,7 +973,8 @@ async function startLiveStream(options = {}) {
 
     liveStreamThresholdSettings = await getAlertThresholdSettings();
     if (generation !== liveStreamGeneration || !isLiveStreamStarting) return;
-    liveAttackScenario = buildLiveAttackScenario(liveStreamThresholdSettings);
+    liveAttackScenarioPool = buildLiveAttackScenarioPool(liveStreamThresholdSettings);
+    liveAttackScenario = liveAttackScenarioPool[0] || buildLiveAttackScenario(liveStreamThresholdSettings);
     
     isLiveStreaming = true;
     isLiveStreamStarting = false;
@@ -1005,6 +1009,9 @@ function pauseLiveStream(options = {}) {
     isLiveStreamStarting = false;
     stopLiveStreamTimers();
     liveAttackScenario = null;
+    liveAttackScenarioPool = [];
+    liveLastScenarioKey = '';
+    liveLastAttackType = '';
     pendingLiveLogs = [];
     updateLiveStreamControls();
     releaseLiveStreamOwnership();
@@ -1067,13 +1074,12 @@ function addNewLiveLog(generation = liveStreamGeneration) {
     if (!isLiveStreaming || generation !== liveStreamGeneration) return;
 
     const severities = ['critical', 'high', 'medium', 'low'];
-    if (!liveAttackScenario || liveAttackScenario.remaining <= 0) {
-        liveAttackScenario = buildLiveAttackScenario(liveStreamThresholdSettings || DEFAULT_LIVE_STREAM_SETTINGS);
-    }
+    liveAttackScenario = selectLiveAttackScenario(liveStreamThresholdSettings || DEFAULT_LIVE_STREAM_SETTINGS);
 
     const attackType = liveAttackScenario.attackType;
     const targetSystem = liveAttackScenario.targetSystem;
-    const sequenceNumber = liveAttackScenario.total - liveAttackScenario.remaining + 1;
+    const sequenceNumber = (liveAttackScenario.sequenceNumber || 0) + 1;
+    liveAttackScenario.sequenceNumber = sequenceNumber;
     const isEscalating = sequenceNumber >= Math.max(1, Number(liveStreamThresholdSettings?.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD);
     
     const newLog = {
@@ -1101,7 +1107,9 @@ function addNewLiveLog(generation = liveStreamGeneration) {
         }
     };
 
-    liveAttackScenario.remaining -= 1;
+    if (sequenceNumber >= liveAttackScenario.total && Math.random() > 0.35) {
+        replaceLiveAttackScenario(liveAttackScenario, liveStreamThresholdSettings || DEFAULT_LIVE_STREAM_SETTINGS);
+    }
     
     pendingLiveLogs.unshift(newLog);
     scheduleLiveLogFlush(generation);
@@ -1138,6 +1146,10 @@ function getAlertThresholdForLog(log, settings) {
     return settings.otherAlertsThreshold;
 }
 
+function scenarioKey(scenario) {
+    return `${scenario?.attackType || ''}|${scenario?.sourceIP || ''}|${scenario?.targetSystem || ''}`;
+}
+
 function getLiveAlertCorrelationKey(log) {
     const scope = getAlertCorrelationScope(log);
     return [
@@ -1147,26 +1159,74 @@ function getLiveAlertCorrelationKey(log) {
     ].join('|');
 }
 
-function buildLiveAttackScenario(settings = DEFAULT_LIVE_STREAM_SETTINGS) {
+function pickLiveAttackType() {
+    const index = Math.floor(Math.random() * LIVE_ATTACK_SCENARIO_TYPES.length);
+    return LIVE_ATTACK_SCENARIO_TYPES[index] || LIVE_ATTACK_SCENARIO_TYPES[0];
+}
+
+function buildLiveAttackScenario(settings = DEFAULT_LIVE_STREAM_SETTINGS, avoidAttackTypes = []) {
     const targetSystems = ['web-server-01', 'db-server-01', 'auth-server-01', 'api-gateway', 'firewall-01'];
     const countries = ['USA', 'China', 'Russia', 'Germany', 'India', 'Brazil'];
-    const attackType = LIVE_ATTACK_SCENARIO_TYPES[liveAttackScenarioCursor % LIVE_ATTACK_SCENARIO_TYPES.length];
+    const avoidSet = new Set((avoidAttackTypes || []).map(value => String(value || '').toLowerCase()));
+    const candidates = LIVE_ATTACK_SCENARIO_TYPES.filter(type => !avoidSet.has(String(type).toLowerCase()));
+    const attackType = candidates.length
+        ? candidates[Math.floor(Math.random() * candidates.length)]
+        : pickLiveAttackType();
     liveAttackScenarioCursor += 1;
     const alertThreshold = getAlertThresholdForLog({ attackType }, settings);
-    const burstTarget = Math.max(
+    const total = Math.max(
         1,
         Number(settings.createIncidentAfter) || DEFAULT_INCIDENT_THRESHOLD,
         Number(alertThreshold) || 1
-    );
+    ) + Math.floor(Math.random() * 3);
 
     return {
         attackType,
         sourceIP: generateIP(),
         targetSystem: targetSystems[Math.floor(Math.random() * targetSystems.length)],
         country: countries[Math.floor(Math.random() * countries.length)],
-        remaining: burstTarget,
-        total: burstTarget
+        sequenceNumber: 0,
+        total
     };
+}
+
+function buildLiveAttackScenarioPool(settings = DEFAULT_LIVE_STREAM_SETTINGS) {
+    const poolSize = Math.min(8, Math.max(5, Number(settings.createIncidentAfter || DEFAULT_INCIDENT_THRESHOLD) + 3));
+    const pool = [];
+    for (let index = 0; index < poolSize; index += 1) {
+        pool.push(buildLiveAttackScenario(settings, pool.slice(-2).map(item => item.attackType)));
+    }
+    return pool;
+}
+
+function replaceLiveAttackScenario(oldScenario, settings = DEFAULT_LIVE_STREAM_SETTINGS) {
+    const index = liveAttackScenarioPool.findIndex(item => scenarioKey(item) === scenarioKey(oldScenario));
+    const avoidTypes = [
+        liveLastAttackType,
+        ...liveAttackScenarioPool.slice(-2).map(item => item.attackType)
+    ];
+    const replacement = buildLiveAttackScenario(settings, avoidTypes);
+    if (index >= 0) {
+        liveAttackScenarioPool[index] = replacement;
+    } else {
+        liveAttackScenarioPool.push(replacement);
+    }
+}
+
+function selectLiveAttackScenario(settings = DEFAULT_LIVE_STREAM_SETTINGS) {
+    if (!liveAttackScenarioPool.length) {
+        liveAttackScenarioPool = buildLiveAttackScenarioPool(settings);
+    }
+
+    let candidates = liveAttackScenarioPool.filter(item => scenarioKey(item) !== liveLastScenarioKey);
+    const differentAttackCandidates = candidates.filter(item => item.attackType !== liveLastAttackType);
+    if (differentAttackCandidates.length) candidates = differentAttackCandidates;
+    if (!candidates.length) candidates = liveAttackScenarioPool;
+
+    const selected = candidates[Math.floor(Math.random() * candidates.length)] || buildLiveAttackScenario(settings);
+    liveLastScenarioKey = scenarioKey(selected);
+    liveLastAttackType = selected.attackType;
+    return selected;
 }
 
 function countSimilarLiveLogs(log) {

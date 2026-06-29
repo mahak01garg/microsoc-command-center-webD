@@ -16,6 +16,11 @@ router.get('/stats', dashboardController.getDashboardStats);
 // @access  Private
 router.get('/realtime', dashboardController.getRealtimeData);
 
+// @route   GET /api/dashboard/attack-map
+// @desc    Get all-time active attack map data
+// @access  Private
+router.get('/attack-map', dashboardController.getAttackMap);
+
 // @route   GET /api/dashboard/activity
 // @desc    Get recent activity
 // @access  Private

@@ -340,6 +340,9 @@ function renderCveBadges(incident = {}) {
 }
 
 function syncIncidentRoleUi() {
+    const activeRoute = document.body?.dataset?.reactRoute || window.location.hash.replace(/^#\/?/, '').split('?')[0];
+    if (activeRoute && activeRoute !== 'incidents') return;
+
     const createButton = document.querySelector('.main-header .btn.btn-primary[onclick*="openNewIncidentModal"]');
     if (createButton) {
         createButton.style.display = isAdminUser() ? '' : 'none';

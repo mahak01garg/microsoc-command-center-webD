@@ -79,7 +79,7 @@ exports.getAuditLogs = async (req, res) => {
 
     const total = await AuditLog.countDocuments(query);
     const totalPages = Math.ceil(total / limitNumber);
-    const stats = await AuditLog.getStatistics(req.query.timeRange || '7d');
+    const stats = await AuditLog.getStatistics(req.query.timeRange || '7d', query);
 
     res.status(200).json({
       success: true,
@@ -101,7 +101,7 @@ exports.getAuditLogs = async (req, res) => {
 
 exports.getAuditLogStats = async (req, res) => {
   try {
-    const stats = await AuditLog.getStatistics(req.query.timeRange || '7d');
+    const stats = await AuditLog.getStatistics(req.query.timeRange || '7d', buildQuery(req));
     res.status(200).json({
       success: true,
       stats

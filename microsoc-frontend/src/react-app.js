@@ -56,12 +56,14 @@
     let pageIntegrityObserver = null;
 
     const isLocalFrontend = ['localhost', '127.0.0.1'].includes(window.location.hostname);
-    const storedApiBaseUrl = localStorage.getItem('microsocApiBaseUrl');
-    const effectiveStoredApiBaseUrl = isLocalFrontend && storedApiBaseUrl === HOSTED_API_BASE_URL
-        ? ''
-        : storedApiBaseUrl;
-    window.MICROSOC_API_BASE_URL = effectiveStoredApiBaseUrl
-        || (isLocalFrontend || localStorage.getItem('microsocUseLocalApi') === 'true' ? LOCAL_API_BASE_URL : HOSTED_API_BASE_URL);
+    if (isLocalFrontend) {
+        window.MICROSOC_API_BASE_URL = LOCAL_API_BASE_URL;
+        localStorage.setItem('microsocUseLocalApi', 'true');
+        localStorage.setItem('microsocApiBaseUrl', LOCAL_API_BASE_URL);
+    } else {
+        window.MICROSOC_API_BASE_URL = localStorage.getItem('microsocApiBaseUrl')
+            || (localStorage.getItem('microsocUseLocalApi') === 'true' ? LOCAL_API_BASE_URL : HOSTED_API_BASE_URL);
+    }
 
     function getRouteFromHash() {
         const route = window.location.hash.replace(/^#\/?/, '').split('?')[0];
@@ -1687,6 +1689,7 @@
                 const root = document.getElementById('legacy-page');
                 if (!root) return;
 
+                root.dataset.activeRoute = route;
                 delete root.dataset.featureSuiteInstalled;
                 delete root.dataset.alertsConsoleInstalled;
                 delete root.dataset.auditLogsConsoleInstalled;
@@ -1711,6 +1714,10 @@
                     document.body.classList.remove('user-management-open');
                     restoreMainContentView();
                 }
+                const routeMainContent = root.querySelector('.main-content');
+                syncRouteChrome(route, routeMainContent);
+                window.setTimeout(() => syncRouteChrome(route, routeMainContent), 100);
+                window.setTimeout(() => syncRouteChrome(route, routeMainContent), 500);
             }
 
             hydrateLegacyPage();
@@ -1766,6 +1773,127 @@
         return payload;
     }
 
+    function normalizeAttackMapCountry(value) {
+        const raw = String(value || '').trim();
+        const aliases = {
+            'united states': 'US',
+            'united states of america': 'US',
+            usa: 'US',
+            'u.s.a.': 'US',
+            america: 'US',
+            germany: 'DE',
+            india: 'IN',
+            china: 'CN',
+            russia: 'RU',
+            'russian federation': 'RU',
+            brazil: 'BR',
+            japan: 'JP',
+            korea: 'KR',
+            'south korea': 'KR',
+            'united kingdom': 'UK',
+            uk: 'UK',
+            france: 'FR'
+        };
+        if (!raw) return 'Unknown';
+        return aliases[raw.toLowerCase()] || raw.toUpperCase();
+    }
+
+    function getAttackMapCountryName(value) {
+        const code = normalizeAttackMapCountry(value);
+        return {
+            US: 'United States',
+            CN: 'China',
+            RU: 'Russia',
+            DE: 'Germany',
+            IN: 'India',
+            BR: 'Brazil',
+            JP: 'Japan',
+            UK: 'United Kingdom',
+            FR: 'France',
+            KR: 'South Korea'
+        }[code] || value || code;
+    }
+
+    function getAttackMapCountryPosition(value, index = 0) {
+        const code = normalizeAttackMapCountry(value);
+        return {
+            US: [30, 25],
+            CN: [35, 75],
+            RU: [25, 65],
+            DE: [40, 48],
+            IN: [45, 70],
+            BR: [55, 30],
+            JP: [40, 85],
+            UK: [36, 46],
+            FR: [42, 47],
+            KR: [39, 82]
+        }[code] || [18 + ((index * 13) % 64), 24 + ((index * 19) % 46)];
+    }
+
+    function renderDashboardAttackMapSurface(container, countries, totalLogs) {
+        const rows = (Array.isArray(countries) ? countries : [])
+            .filter(item => item && item.country)
+            .map(item => ({
+                country: getAttackMapCountryName(item.country),
+                code: normalizeAttackMapCountry(item.country),
+                count: Number(item.count || 0),
+                severityRank: Number(item.severityRank || 1)
+            }))
+            .filter(item => item.count > 0)
+            .sort((a, b) => b.count - a.count);
+
+        const total = Number(totalLogs || rows.reduce((sum, item) => sum + item.count, 0));
+        const severityClass = rank => rank >= 4 ? 'critical' : rank === 3 ? 'high' : rank === 2 ? 'medium' : 'low';
+        const severityColor = rank => rank >= 4 ? '#ef4444' : rank === 3 ? '#f97316' : rank === 2 ? '#facc15' : '#22c55e';
+
+        container.dataset.attackMapSource = 'server';
+        container.innerHTML = `
+            <div class="map-surface map-surface--aggregate">
+                <div class="map-grid"></div>
+                <div class="attack-map-total-badge" style="position:absolute;right:12px;top:12px;z-index:4;padding:7px 10px;border-radius:999px;background:rgba(2,6,23,0.78);border:1px solid rgba(103,232,249,0.28);color:#a5f3fc;font-weight:800;font-size:12px;">All-time logs ${total.toLocaleString()}</div>
+                ${rows.length ? '' : '<div class="map-empty-state">No country activity yet.</div>'}
+                ${rows.map((item, index) => {
+                    const [top, left] = getAttackMapCountryPosition(item.code, index);
+                    return `
+                        <button class="map-point map-point-${severityClass(item.severityRank)} map-point-${item.code}" style="top:${top}%;left:${left}%;width:44px;height:44px;border:0;background:${severityColor(item.severityRank)};" title="${item.country} · ${item.count} attacks">
+                            <span class="map-point-count">${item.count}</span>
+                            <span class="map-tooltip">${item.country} • ${item.count} attacks</span>
+                        </button>
+                    `;
+                }).join('')}
+            </div>
+            <div class="attack-country-summary">
+                <div class="attack-country-summary-title">All-time active logs · ${total.toLocaleString()} attacks</div>
+                <div class="attack-country-summary-list">
+                    ${rows.map(item => `
+                        <div class="attack-country-summary-item">
+                            <span>${item.country}</span>
+                            <strong>${item.count}</strong>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    async function forceDashboardAttackMapAggregate(root = document) {
+        const container = root.querySelector?.('#attack-map-container') || document.getElementById('attack-map-container');
+        if (!container) return;
+
+        container.innerHTML = '<div class="map-empty-state">Loading all-time attack map...</div>';
+        try {
+            const payload = await apiRequest(`/dashboard/attack-map?_=${Date.now()}`);
+            renderDashboardAttackMapSurface(container, payload.countryAttackMap || [], payload.totalLogs);
+            console.info('MicroSOC aggregate attack map rendered', {
+                totalLogs: payload.totalLogs,
+                countries: (payload.countryAttackMap || []).length
+            });
+        } catch (error) {
+            console.error('Force aggregate attack map failed:', error);
+            container.innerHTML = '<div class="map-empty-state">Attack map unavailable. Please check backend connection.</div>';
+        }
+    }
+
     function installFeatureSuite(route, root) {
         if (!protectedRoutes.has(route) || !root || root.dataset.featureSuiteInstalled) return;
         root.dataset.featureSuiteInstalled = 'true';
@@ -1780,6 +1908,10 @@
                 refreshLegacyDashboardData(root);
             }
             root.querySelector('.feature-attack-viz')?.remove();
+            window.refreshAttackMap = () => forceDashboardAttackMapAggregate(root);
+            forceDashboardAttackMapAggregate(root);
+            window.setTimeout(() => forceDashboardAttackMapAggregate(root), 750);
+            window.setTimeout(() => forceDashboardAttackMapAggregate(root), 2500);
         }
         if (route === 'alerts') renderAlertsConsole(root);
         if (route === 'audit-logs') renderAuditLogsConsole(root);
@@ -2938,14 +3070,17 @@
             return log.details || 'No details captured.';
         }
 
-        const renderSummary = (stats = {}, logs = currentLogs) => {
+        const renderSummary = (stats = {}, logs = currentLogs, pagination = {}) => {
             const visibleLogs = Array.isArray(logs) ? logs : [];
-            const totalEvents = visibleLogs.length || stats.totalEvents?.[0]?.count || 0;
-            const byRole = visibleLogs.reduce((acc, log) => {
-                const role = getAuditGroupRole(log);
-                acc[role] = (acc[role] || 0) + 1;
-                return acc;
-            }, {});
+            const totalEvents = Number(pagination.total ?? stats.totalEvents?.[0]?.count ?? visibleLogs.length) || 0;
+            const roleStats = Object.fromEntries((stats.byRole || []).map((item) => [normalizeRole(item._id), item.count]));
+            const byRole = Object.keys(roleStats).length
+                ? roleStats
+                : visibleLogs.reduce((acc, log) => {
+                    const role = getAuditGroupRole(log);
+                    acc[role] = (acc[role] || 0) + 1;
+                    return acc;
+                }, {});
             const byResult = Object.fromEntries((stats.byResult || []).map((item) => [item._id, item.count]));
             const byModule = Object.fromEntries((stats.byModule || []).map((item) => [item._id, item.count]));
 
@@ -3138,7 +3273,11 @@
 
             const payload = await apiRequest(`/audit-logs?${params.toString()}`);
             currentLogs = payload.logs || [];
-            renderSummary(payload.stats || {}, currentLogs);
+            renderSummary(payload.stats || {}, currentLogs, {
+                total: payload.total,
+                page: payload.page,
+                totalPages: payload.totalPages
+            });
             renderGroups(currentLogs);
         }
 
@@ -4082,7 +4221,7 @@
 
     async function renderAttackVisualization(root) {
         const host = findContentHost(root);
-        if (root.querySelector('.feature-attack-viz')) return;
+        root.querySelector('.feature-attack-viz')?.remove();
         const panel = document.createElement('section');
         panel.className = 'feature-panel feature-attack-viz';
         panel.innerHTML = `
@@ -4154,8 +4293,8 @@
         }
 
         try {
-            const [realtime, stats] = await Promise.all([
-                apiRequest('/dashboard/realtime'),
+            const [attackMap, stats] = await Promise.all([
+                apiRequest('/dashboard/attack-map'),
                 apiRequest('/logs/stats?timeRange=24h')
             ]);
             const coordinates = {
@@ -4193,8 +4332,8 @@
                 'united kingdom': 'UK',
                 uk: 'UK'
             };
-            const countryAttacks = realtime.realtimeData?.countryAttackMap || [];
-            const attackers = countryAttacks.length ? countryAttacks : (realtime.realtimeData?.topAttackers || []);
+            const countryAttacks = attackMap.countryAttackMap || [];
+            const attackers = countryAttacks.length ? countryAttacks : [];
             const maxCount = Math.max(...attackers.map(item => item.count || item.attacks || 1), 1);
             const normalizeCountry = (value) => {
                 const raw = String(value || '').trim();
@@ -4221,7 +4360,7 @@
             const countrySummary = attackers.length
                 ? `
                     <div class="attack-map-summary">
-                        <div class="attack-map-summary-title">Country breakdown</div>
+                        <div class="attack-map-summary-title">All-time active logs · ${Number(attackMap.totalLogs || 0).toLocaleString()} attacks</div>
                         <div class="attack-map-summary-list">
                             ${attackers.map((attacker) => {
                                 const countryName = getCountryDisplayName(attacker.country || attacker._id || attacker.ip);
