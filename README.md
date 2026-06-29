@@ -25,6 +25,8 @@ MicroSOC helps an analyst/admin monitor and investigate security events through:
 - Archive support for logs, alerts, and incidents
 - Dashboard metrics, analytics, attack map, and system health
 - LLM-powered SOC assistant for reports, chat, triage, and recommendations
+- Failed authentication attempts recorded as audit failures
+- Real incident response-time metrics shared by Dashboard and Analytics
 
 ## Tech Stack
 
@@ -106,6 +108,48 @@ Audit Log Records System Action
 | Settings | Thresholds, theme, notification preferences, AI toggles, system status |
 | Threat Intelligence | CVE lookup, MITRE mapping, and IOC analysis in analyst-friendly cards |
 
+## Dashboard And Analytics Metrics
+
+Dashboard and Analytics share the same backend incident response-time source. The value is not a mock or a count of critical logs.
+
+### Avg Response Time Formula
+
+For each incident:
+
+```text
+response time = first response timestamp - incident created timestamp
+```
+
+The first response timestamp is chosen in this order:
+
+1. `metrics.timeToRespond`, if already saved on the incident.
+2. The first timeline transition from `open` to `in_progress`, `resolved`, or `closed`.
+3. If no timeline transition is available but the incident is no longer open, `updatedAt`.
+
+Then:
+
+```text
+avgResponseTime =
+  sum(all incident response times in minutes)
+  / number of incidents with a response time
+```
+
+The backend stores this metric in minutes. The UI displays it as `<1m`, `Xm`, or `X.Xh` depending on the value.
+
+When an incident moves from `open` to `in_progress`, `resolved`, or `closed`, MicroSOC stores `metrics.timeToRespond` so future reports use a stable value.
+
+### Attack Map Metric
+
+The dashboard attack map uses all-time active security logs grouped by normalized country aliases. For example:
+
+```text
+USA, US, United States -> US
+China, CN -> CN
+Brazil, BR -> BR
+```
+
+This prevents duplicate small markers for the same country and keeps the map count aligned with the total active log volume.
+
 ## Authentication And Email Flow
 
 MicroSOC includes a complete auth flow, not only a login screen.
@@ -147,6 +191,8 @@ Important behavior:
 - Rejected users cannot login.
 - Disabled users cannot login until an admin enables them again.
 - Approved users can login normally.
+- Failed login attempts are written to Audit Logs with `result = failure`.
+- Failure cases include unknown email, wrong password, disabled account, pending approval, and rejected approval.
 
 ### User Management Email Notifications
 
@@ -420,6 +466,17 @@ The LLM is used for:
 
 The project does not train a custom language model. It integrates an external LLM provider API and sends redacted/summarized SOC context so the model can return analyst-friendly JSON responses.
 
+The chat assistant receives a compact project-wide context snapshot, including:
+
+- Current log totals, blocked count, severity distribution, attack types, top sources, and attack map data
+- Alert totals, status/severity breakdown, and recent alerts
+- Incident totals, open/in-progress incidents, and severity breakdown
+- Recent audit events and total audit count
+- Current settings for thresholds, incident automation, AI, notifications, and dashboard refresh
+- MicroSOC behavior rules such as threshold logic, country normalization, archive strategy, and response-time formula
+
+The assistant should use this context as the source of truth and should say when a value is unavailable instead of inventing data.
+
 ## Audit Logging
 
 Audit logs are split into human/admin actions and system actions.
@@ -429,6 +486,7 @@ Audit logs are split into human/admin actions and system actions.
 Examples:
 
 - User login
+- User login failed
 - Settings changed by an admin
 - Incident assigned
 - Alert resolved
@@ -459,6 +517,17 @@ Audit detail drawers show useful fields such as:
 - Record ID
 - IP address, only when captured by backend
 - User agent, only when captured by backend
+
+Failed authentication attempts are recorded with:
+
+```text
+action = User Login Failed
+module = auth
+result = failure
+targetType = Login Attempt
+```
+
+These failed login records count toward the Audit Logs failure summary.
 
 If a field is not available, the UI hides it instead of showing noisy values like "Unknown" or "Not Captured".
 
@@ -618,11 +687,12 @@ FRONTEND_URL=http://localhost:5173
 Optional AI values:
 
 ```env
-AI_PROVIDER=openai
+AI_PROVIDER=openrouter
 AI_BASE_URL=https://openrouter.ai/api/v1
 AI_MODEL=openrouter/owl-alpha
 OPENAI_API_KEY=
 AI_REQUIRE_PROVIDER=true
+AI_ALLOW_LOCAL_FALLBACK=false
 ```
 
 Optional email values:
@@ -673,6 +743,8 @@ Frontend runs on:
 http://localhost:5173
 ```
 
+The local frontend dev server sends `Cache-Control: no-store` for static files so route/script changes are visible immediately during development.
+
 ## Demo Flow
 
 Use this flow when presenting the project:
@@ -698,6 +770,7 @@ Show:
 - Critical threats
 - Attack prevention
 - Blocked attacks
+- Real average incident response time
 - Live logs
 - Attack map
 - Top attackers
@@ -765,6 +838,7 @@ Open Audit Logs and show:
 
 - Admin actions
 - System actions
+- Failed login attempts with `result = failure`
 - Alert auto-generated events
 - Auto incident created/updated events
 - Settings updated events
